@@ -2,7 +2,11 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import AuthGuard from '../components/AuthGuard';
 import DeleteSheetModal from '../components/DeleteSheetModal';
+import SheetFileMenu from '../components/SheetFileMenu';
+import SyncStatusBadge from '../components/SyncStatusBadge';
+import { useTelegramAuthContext } from '../components/TelegramAuthProvider';
 import { 
   ChevronDown, 
   Plus, 
@@ -88,6 +92,19 @@ const generateSheetName = (sheets: Sheet[]): string => {
 };
 
 export default function App() {
+  return (
+    <AuthGuard>
+      <SpreadsheetApp />
+    </AuthGuard>
+  );
+}
+
+function SpreadsheetApp() {
+  const { user } = useTelegramAuthContext();
+  const userInitial = user
+    ? (user.first_name?.charAt(0) || user.username?.charAt(0) || 'U').toUpperCase()
+    : 'U';
+
   // Sheets State
   const [sheets, setSheets] = useState<Sheet[]>([
     { id: '1', name: 'Sheet1', data: {}, colWidths: {}, rowHeights: {} },
@@ -357,8 +374,10 @@ export default function App() {
               defaultValue="Untitled spreadsheet" 
               className="text-lg text-gray-700 font-medium focus:outline-none focus:border-b-2 focus:border-green-600 px-1"
             />
+            <SyncStatusBadge />
             <div className="flex gap-4 text-xs text-gray-600 mt-1">
-              {['File', 'Edit', 'View', 'Insert', 'Format', 'Data', 'Tools', 'Extensions', 'Help'].map(menu => (
+              <SheetFileMenu />
+              {['Edit', 'View', 'Insert', 'Format', 'Data', 'Tools', 'Extensions', 'Help'].map(menu => (
                 <span key={menu} className="hover:bg-gray-100 px-1 rounded cursor-pointer">{menu}</span>
               ))}
             </div>
@@ -373,7 +392,7 @@ export default function App() {
             Share
           </button>
           <div className="w-8 h-8 bg-purple-600 rounded-full flex items-center justify-center text-white font-bold">
-            U
+            {userInitial}
           </div>
         </div>
       </div>

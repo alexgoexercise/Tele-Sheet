@@ -53,16 +53,16 @@ export default function TelegramPage() {
     <div className="min-h-screen bg-zinc-950 text-zinc-100 p-6 font-sans">
       <div className="max-w-3xl mx-auto space-y-6">
         <div className="flex items-center justify-between gap-4">
-          <h1 className="text-xl font-semibold tracking-tight">Local Telegram (TDLib)</h1>
+          <h1 className="text-xl font-semibold tracking-tight">Local Telegram (Teleproto)</h1>
           <Link href="/" className="text-sm text-zinc-400 hover:text-zinc-200 underline-offset-4 hover:underline">
             Spreadsheet
           </Link>
         </div>
 
         <p className="text-sm text-zinc-400 leading-relaxed">
-          Run the Rust bridge from the repo root: <code className="text-zinc-300">cd server && cargo run</code> after
-          setting <code className="text-zinc-300">TELEGRAM_API_ID</code> and{' '}
-          <code className="text-zinc-300">TELEGRAM_API_HASH</code> (from{' '}
+          Start the app with <code className="text-zinc-300">npm run dev</code> — the Teleproto bridge starts
+          automatically. Set <code className="text-zinc-300">TELEGRAM_API_ID</code> and{' '}
+          <code className="text-zinc-300">TELEGRAM_API_HASH</code> in <code className="text-zinc-300">.env</code> (from{' '}
           <a
             href="https://my.telegram.org"
             className="text-sky-400 hover:text-sky-300 underline-offset-4 hover:underline"
