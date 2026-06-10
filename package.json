@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "telegram-server": "cargo run --manifest-path server/Cargo.toml"
   },
   "dependencies": {
     "lucide-react": "^0.555.0",

@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import DeleteSheetModal from '../components/DeleteSheetModal';
 import { 
   ChevronDown, 
@@ -96,6 +97,8 @@ export default function App() {
   const [showSheetList, setShowSheetList] = useState<boolean>(false);
   const [showDeleteModal, setShowDeleteModal] = useState<boolean>(false);
   const [sheetToDelete, setSheetToDelete] = useState<string | null>(null);
+  const [dropdownPosition, setDropdownPosition] = useState<{ top: number; left: number } | null>(null);
+  const hamburgerRef = useRef<HTMLDivElement>(null);
 
   // Get current active sheet
   const activeSheet = sheets.find(s => s.id === activeSheetId) || sheets[0];
@@ -174,6 +177,7 @@ export default function App() {
       const target = e.target as HTMLElement;
       if (showSheetList && !target.closest('[data-sheet-list]')) {
         setShowSheetList(false);
+        setDropdownPosition(null);
       }
     };
 
@@ -529,41 +533,28 @@ export default function App() {
         >
            <Plus className="w-5 h-5 text-gray-600" />
         </button>
-        <button
-          onClick={() => setShowSheetList(!showSheetList)}
-          className="p-1 hover:bg-gray-100 rounded cursor-pointer flex-shrink-0 relative"
-          title="Show all sheets"
+        <div 
+          ref={hamburgerRef}
+          className="relative flex-shrink-0" 
           data-sheet-list
         >
-           <Menu className="w-4 h-4 text-gray-600" />
-           {showSheetList && (
-             <div 
-               className="absolute bottom-full left-0 mb-1 bg-white border border-gray-300 rounded shadow-lg z-50 min-w-[200px] max-h-[400px] overflow-y-auto"
-               data-sheet-list
-             >
-               <div className="py-1">
-                 {sheets.map((sheet) => (
-                   <button
-                     key={sheet.id}
-                     onClick={() => {
-                       handleSheetClick(sheet.id);
-                       setShowSheetList(false);
-                     }}
-                     className={`w-full text-left px-4 py-2 text-sm hover:bg-gray-100 flex items-center justify-between ${
-                       sheet.id === activeSheetId ? 'bg-green-50 text-green-700 font-medium' : 'text-gray-700'
-                     }`}
-                     data-sheet-list
-                   >
-                     <span>{sheet.name}</span>
-                     {sheet.id === activeSheetId && (
-                       <span className="text-green-600">✓</span>
-                     )}
-                   </button>
-                 ))}
-               </div>
-             </div>
-           )}
-        </button>
+          <button
+            onClick={() => {
+              if (hamburgerRef.current) {
+                const rect = hamburgerRef.current.getBoundingClientRect();
+                setDropdownPosition({
+                  top: rect.top - 8, // 8px margin above
+                  left: rect.left
+                });
+              }
+              setShowSheetList(!showSheetList);
+            }}
+            className="p-1 hover:bg-gray-100 rounded cursor-pointer"
+            title="Show all sheets"
+          >
+             <Menu className="w-4 h-4 text-gray-600" />
+          </button>
+        </div>
         {sheets.map((sheet) => (
           <button
             key={sheet.id}
@@ -591,6 +582,45 @@ export default function App() {
         sheetName={sheets.find(s => s.id === sheetToDelete)?.name || ''}
         canDelete={sheets.length > 1}
       />
+
+      {/* Sheet List Dropdown Portal */}
+      {showSheetList && dropdownPosition && typeof window !== 'undefined' && createPortal(
+        <div 
+          className="fixed bg-white border border-gray-300 rounded shadow-lg min-w-[200px] max-h-[400px] overflow-y-auto"
+          style={{
+            top: `${dropdownPosition.top}px`,
+            left: `${dropdownPosition.left}px`,
+            transform: 'translateY(-100%)',
+            marginBottom: '8px',
+            zIndex: 9998
+          }}
+          data-sheet-list
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="py-1">
+            {sheets.map((sheet) => (
+              <button
+                key={sheet.id}
+                onClick={() => {
+                  handleSheetClick(sheet.id);
+                  setShowSheetList(false);
+                  setDropdownPosition(null);
+                }}
+                className={`w-full text-left px-4 py-2 text-sm hover:bg-gray-100 flex items-center justify-between ${
+                  sheet.id === activeSheetId ? 'bg-green-50 text-green-700 font-medium' : 'text-gray-700'
+                }`}
+                data-sheet-list
+              >
+                <span>{sheet.name}</span>
+                {sheet.id === activeSheetId && (
+                  <span className="text-green-600">✓</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>,
+        document.body
+      )}
     </div>
   );
 }

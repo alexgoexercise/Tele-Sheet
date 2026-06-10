@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 
 type ModalProps = {
   isOpen: boolean;
@@ -42,9 +43,10 @@ export default function Modal({
     xl: 'max-w-xl'
   };
 
-  return (
+  const modalContent = (
     <div 
-      className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+      className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center"
+      style={{ zIndex: 9999 }}
       onClick={onClose}
     >
       <div 
@@ -65,5 +67,12 @@ export default function Modal({
       </div>
     </div>
   );
+
+  // Use portal to render modal at document root level
+  if (typeof window !== 'undefined') {
+    return createPortal(modalContent, document.body);
+  }
+
+  return null;
 }
 
