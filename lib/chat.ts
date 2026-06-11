@@ -59,6 +59,35 @@ export function sortDialogsByDate(dialogs: TelegramDialog[]): TelegramDialog[] {
   return [...dialogs].sort((a, b) => b.last_message_date - a.last_message_date);
 }
 
+function findDialogIndex(dialogs: TelegramDialog[], chatId: string): number {
+  return dialogs.findIndex(
+    (d) => chatIdsMatch(d.chat_id, chatId) || chatIdsMatch(d.id, chatId),
+  );
+}
+
+/** Bump a conversation to the top when a live message arrives (inbox overview). */
+export function patchDialogsOnMessage(
+  dialogs: TelegramDialog[],
+  message: TelegramMessage,
+): { dialogs: TelegramDialog[]; found: boolean } {
+  const chatId = message.chat_id;
+  if (!chatId) return { dialogs, found: false };
+
+  const idx = findDialogIndex(dialogs, chatId);
+  if (idx < 0) return { dialogs, found: false };
+
+  const dialog = dialogs[idx];
+  const msgDate = message.date ?? dialog.last_message_date;
+  const updated: TelegramDialog = {
+    ...dialog,
+    last_message_date: Math.max(msgDate, dialog.last_message_date),
+    unread_count: message.out ? dialog.unread_count : dialog.unread_count + 1,
+  };
+
+  const rest = dialogs.filter((_, i) => i !== idx);
+  return { dialogs: sortDialogsByDate([updated, ...rest]), found: true };
+}
+
 export function filterMainInboxDialogs(dialogs: TelegramDialog[]): TelegramDialog[] {
   return dialogs.filter((d) => !d.archived);
 }
