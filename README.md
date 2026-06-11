@@ -22,6 +22,10 @@ TELEGRAM_API_ID=your_numeric_id
 TELEGRAM_API_HASH=your_hash
 ```
 
+Here, the `your_numeric_id` and `your_hash` is applied through [https://core.telegram.org/](https://core.telegram.org/).
+
+The tutorial of application can be found here: [https://core.telegram.org/api/obtaining_api_id](https://core.telegram.org/api/obtaining_api_id_)
+
 ```bash
 npm run dev
 ```
