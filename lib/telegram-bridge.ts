@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Api, TelegramClient, events, sessions } from 'teleproto';
 import type { Dialog } from 'teleproto/tl/custom/dialog.js';
+import { getDisplayName, getPeerId } from 'teleproto/Utils';
 import { WebSocket, WebSocketServer } from 'ws';
 
 const { StringSession } = sessions;
@@ -140,9 +141,10 @@ function serializeUser(user: Api.User) {
 }
 
 function serializeDialog(dialog: Dialog) {
+  const chatId = dialog.id?.toString() ?? '';
   return {
-    id: dialog.id?.toString(),
-    chat_id: dialog.entity?.id?.toString(),
+    id: chatId,
+    chat_id: chatId,
     title: dialog.title ?? dialog.name ?? '',
     unread_count: dialog.unreadCount ?? 0,
     last_message_date: dialog.date ?? 0,
@@ -159,14 +161,17 @@ type MessageLike = {
   message?: string;
   out?: boolean;
   editDate?: number;
+  postAuthor?: string;
   replyTo?: { replyToMsgId?: number };
   chatId?: { toString(): string } | string | number | bigint;
   senderId?: { toString(): string } | string | number | bigint;
   peerId?: Api.TypePeer;
   fromId?: Api.TypePeer;
+  sender?: object;
+  _sender?: object;
 };
 
-function serializeMessage(message: MessageLike) {
+async function serializeMessage(message: MessageLike, tg?: TelegramClient) {
   const chatId =
     message.chatId != null
       ? String(message.chatId)
@@ -180,12 +185,34 @@ function serializeMessage(message: MessageLike) {
         ? getPeerId(message.fromId)
         : undefined;
 
+  let sender_name = '';
+  let sender_username = '';
+  const embeddedSender = message.sender ?? message._sender;
+  if (embeddedSender instanceof Api.User) {
+    sender_name = getDisplayName(embeddedSender) || embeddedSender.username || '';
+    sender_username = embeddedSender.username ?? '';
+  } else if (message.postAuthor) {
+    sender_name = message.postAuthor;
+  } else if (tg && senderId) {
+    try {
+      const entity = await tg.getEntity(senderId);
+      if (entity instanceof Api.User) {
+        sender_name = getDisplayName(entity) || entity.username || '';
+        sender_username = entity.username ?? '';
+      }
+    } catch {
+      // sender not in entity cache yet
+    }
+  }
+
   return {
     id: message.id,
     chat_id: chatId,
     date: message.date,
     text: message.message ?? '',
     sender_id: senderId,
+    sender_name: sender_name || undefined,
+    sender_username: sender_username || undefined,
     out: message.out ?? false,
     reply_to: message.replyTo?.replyToMsgId,
     edit_date: message.editDate,
@@ -193,7 +220,11 @@ function serializeMessage(message: MessageLike) {
   };
 }
 
-function serializeChat(entity: object, chatId: string) {
+async function serializeMessages(messages: object[], tg: TelegramClient) {
+  return Promise.all(messages.map((m) => serializeMessage(m as MessageLike, tg)));
+}
+
+function serializeChat(entity: object) {
   const e = entity as {
     className?: string;
     title?: string;
@@ -202,6 +233,7 @@ function serializeChat(entity: object, chatId: string) {
     username?: string;
     broadcast?: boolean;
   };
+  const chatId = getPeerId(entity as Parameters<typeof getPeerId>[0]);
 
   const title = e.title
     ? e.title
@@ -219,6 +251,10 @@ function serializeChat(entity: object, chatId: string) {
   };
 }
 
+function chatIdFromEntity(entity: object): string {
+  return getPeerId(entity as Parameters<typeof getPeerId>[0]);
+}
+
 async function requireAuth(ws: WebSocket): Promise<TelegramClient | null> {
   if (!client) {
     sendToClient(ws, { '@type': 'error', message: CREDENTIALS_ERROR });
@@ -231,14 +267,6 @@ async function requireAuth(ws: WebSocket): Promise<TelegramClient | null> {
   return client;
 }
 
-function getPeerId(peer: Api.TypePeer | undefined): string | undefined {
-  if (!peer) return undefined;
-  if (peer instanceof Api.PeerUser) return peer.userId.toString();
-  if (peer instanceof Api.PeerChat) return peer.chatId.toString();
-  if (peer instanceof Api.PeerChannel) return peer.channelId.toString();
-  return undefined;
-}
-
 async function resolveChat(chatId: string | number) {
   return getClient().getEntity(String(chatId));
 }
@@ -249,19 +277,20 @@ function registerEventHandlers() {
 
   client.addEventHandler(async (event) => {
     const message = event.message;
-    if (!message) return;
+    if (!message || !client) return;
+    const serialized = await serializeMessage(message as MessageLike, client);
     broadcast({
       '@type': 'updateNewMessage',
-      message: serializeMessage(message),
+      message: serialized,
     });
   }, new NewMessage({}));
 
   client.addEventHandler(async (event) => {
     const message = event.message;
-    if (!message) return;
+    if (!message || !client) return;
     broadcast({
       '@type': 'updateMessageEdited',
-      message: serializeMessage(message),
+      message: await serializeMessage(message as MessageLike, client),
     });
   }, new EditedMessage({}));
 
@@ -602,7 +631,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
       const entity = await resolveChat(cmd.chat_id);
       sendToClient(ws, {
         '@type': 'updateChat',
-        chat: serializeChat(entity, String(cmd.chat_id)),
+        chat: serializeChat(entity),
       });
       return;
     }
@@ -615,6 +644,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
         return;
       }
       const entity = await resolveChat(cmd.chat_id);
+      const chatId = chatIdFromEntity(entity);
       const messages = await tg.getMessages(entity, {
         limit: cmd.limit ?? 30,
         offsetId: cmd.offset_id ?? 0,
@@ -622,8 +652,8 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
       });
       sendToClient(ws, {
         '@type': 'updateMessages',
-        chat_id: String(cmd.chat_id),
-        messages: messages.map((m) => serializeMessage(m)),
+        chat_id: chatId,
+        messages: await serializeMessages(messages, tg),
       });
       return;
     }
@@ -641,14 +671,15 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
         return;
       }
       const entity = await resolveChat(cmd.chat_id);
+      const chatId = chatIdFromEntity(entity);
       const sent = await tg.sendMessage(entity, {
         message: text,
         replyTo: cmd.reply_to,
       });
       sendToClient(ws, {
         '@type': 'updateMessageSendSucceeded',
-        chat_id: String(cmd.chat_id),
-        message: serializeMessage(sent),
+        chat_id: chatId,
+        message: await serializeMessage(sent as MessageLike, tg),
       });
       return;
     }
@@ -672,7 +703,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
       });
       sendToClient(ws, {
         '@type': 'updateMessageEdited',
-        message: serializeMessage(edited),
+        message: await serializeMessage(edited as MessageLike, tg),
       });
       return;
     }
@@ -689,10 +720,11 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
         return;
       }
       const entity = await resolveChat(cmd.chat_id);
+      const chatId = chatIdFromEntity(entity);
       await tg.deleteMessages(entity, cmd.message_ids, { revoke: cmd.revoke ?? true });
       sendToClient(ws, {
         '@type': 'updateMessagesDeleted',
-        chat_id: String(cmd.chat_id),
+        chat_id: chatId,
         message_ids: cmd.message_ids,
       });
       return;
@@ -706,13 +738,14 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
         return;
       }
       const entity = await resolveChat(cmd.chat_id);
+      const chatId = chatIdFromEntity(entity);
       const success = await tg.markAsRead(
         entity,
         cmd.message_id != null ? cmd.message_id : undefined,
       );
       sendToClient(ws, {
         '@type': 'updateMarkAsRead',
-        chat_id: String(cmd.chat_id),
+        chat_id: chatId,
         success,
       });
       return;
@@ -726,15 +759,16 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
         return;
       }
       const entity = await resolveChat(cmd.chat_id);
+      const chatId = chatIdFromEntity(entity);
       sendToClient(ws, {
         '@type': 'updateChat',
-        chat: serializeChat(entity, String(cmd.chat_id)),
+        chat: serializeChat(entity),
       });
       const messages = await tg.getMessages(entity, { limit: cmd.limit ?? 30 });
       sendToClient(ws, {
         '@type': 'updateMessages',
-        chat_id: String(cmd.chat_id),
-        messages: messages.map((m) => serializeMessage(m)),
+        chat_id: chatId,
+        messages: await serializeMessages(messages, tg),
       });
       return;
     }

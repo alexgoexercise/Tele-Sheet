@@ -2,16 +2,16 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { TelegramMessage, WsUpdate } from '../lib/telegram-api-types';
+import { chatIdsMatch, sortMessagesByDate } from '../lib/chat';
 import { useTelegramAuthContext } from '../components/TelegramAuthProvider';
 
 function upsertMessage(messages: TelegramMessage[], incoming: TelegramMessage): TelegramMessage[] {
   const idx = messages.findIndex((m) => m.id === incoming.id);
-  if (idx >= 0) {
-    const next = [...messages];
-    next[idx] = incoming;
-    return next;
-  }
-  return [...messages, incoming];
+  const next =
+    idx >= 0
+      ? messages.map((m, i) => (i === idx ? { ...m, ...incoming } : m))
+      : [...messages, incoming];
+  return sortMessagesByDate(next);
 }
 
 export function useChatMessages(chatId: string) {
@@ -36,18 +36,28 @@ export function useChatMessages(chatId: string) {
       if (update['@type'] === 'updateChat') {
         setChatTitle(update.chat.title);
       }
-      if (update['@type'] === 'updateMessages' && update.chat_id === chatId) {
-        setMessages(update.messages);
+      if (update['@type'] === 'updateMessages' && chatIdsMatch(update.chat_id, chatId)) {
+        setMessages(sortMessagesByDate(update.messages));
         setLoading(false);
         setError(null);
       }
-      if (update['@type'] === 'updateNewMessage' && update.message.chat_id === chatId) {
+      if (
+        update['@type'] === 'updateNewMessage' &&
+        chatIdsMatch(update.message.chat_id, chatId)
+      ) {
+        setMessages((prev) => upsertMessage(prev, update.message));
+        setLoading(false);
+      }
+      if (
+        update['@type'] === 'updateMessageSendSucceeded' &&
+        chatIdsMatch(update.chat_id, chatId)
+      ) {
         setMessages((prev) => upsertMessage(prev, update.message));
       }
-      if (update['@type'] === 'updateMessageSendSucceeded' && update.chat_id === chatId) {
-        setMessages((prev) => upsertMessage(prev, update.message));
-      }
-      if (update['@type'] === 'updateMessageEdited' && update.message.chat_id === chatId) {
+      if (
+        update['@type'] === 'updateMessageEdited' &&
+        chatIdsMatch(update.message.chat_id, chatId)
+      ) {
         setMessages((prev) => upsertMessage(prev, update.message));
       }
       if (update['@type'] === 'error') {

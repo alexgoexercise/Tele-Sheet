@@ -39,6 +39,8 @@ export type TelegramMessage = {
   date?: number;
   text: string;
   sender_id?: string;
+  sender_name?: string;
+  sender_username?: string;
   out: boolean;
   reply_to?: number;
   edit_date?: number;
