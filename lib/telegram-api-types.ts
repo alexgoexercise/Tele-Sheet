@@ -20,6 +20,8 @@ export type TelegramDialog = {
   last_message_date: number;
   is_group: boolean;
   is_user: boolean;
+  archived: boolean;
+  pinned: boolean;
 };
 
 export type TelegramChat = {
@@ -57,7 +59,7 @@ export type WsCommand =
   // User
   | { method: 'getMe' }
   // Chats
-  | { method: 'getDialogs'; limit?: number }
+  | { method: 'getDialogs'; limit?: number; archived?: boolean }
   | { method: 'getChat'; chat_id: string | number }
   | { method: 'openChat'; chat_id: string | number; limit?: number }
   | { method: 'markAsRead'; chat_id: string | number; message_id?: number }

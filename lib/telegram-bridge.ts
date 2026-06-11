@@ -24,6 +24,7 @@ type WsCommand = {
   offset_id?: number;
   search?: string;
   revoke?: boolean;
+  archived?: boolean;
 };
 
 type BridgeGlobal = typeof globalThis & {
@@ -147,6 +148,8 @@ function serializeDialog(dialog: Dialog) {
     last_message_date: dialog.date ?? 0,
     is_group: dialog.isGroup,
     is_user: dialog.isUser,
+    archived: dialog.archived,
+    pinned: dialog.pinned,
   };
 }
 
@@ -578,7 +581,10 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
     case 'getDialogs': {
       const tg = await requireAuth(ws);
       if (!tg) return;
-      const dialogs = await tg.getDialogs({ limit: cmd.limit ?? 50 });
+      const limit = cmd.limit ?? 50;
+      const dialogs = await tg.getDialogs(
+        cmd.archived === true ? { limit, folder: 1 } : { limit, folder: 0 },
+      );
       sendToClient(ws, {
         '@type': 'updateDialogs',
         dialogs: dialogs.map((d) => serializeDialog(d)),

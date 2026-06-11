@@ -66,7 +66,7 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (step === 'ready') {
-      router.replace('/');
+      router.replace('/chats');
     }
   }, [step, router]);
 
