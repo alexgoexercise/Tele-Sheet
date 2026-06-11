@@ -1,36 +1,122 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# TeleSheet
 
-## Getting Started
+A Telegram client disguised as Google Sheets. The UI looks like a spreadsheet; messaging runs through a Teleproto backend embedded in the Next.js server.
 
-First, run the development server:
+## Requirements
+
+- Node.js 18+
+- A Telegram account
+- API credentials from [my.telegram.org](https://my.telegram.org) (API development tools)
+
+## Setup
+
+```bash
+npm install
+cp .env.example .env
+```
+
+Edit `.env`:
+
+```
+TELEGRAM_API_ID=your_numeric_id
+TELEGRAM_API_HASH=your_hash
+```
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000). The Telegram bridge starts automatically with the app (WebSocket on port 8765). No separate server process is needed.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Routes
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| URL | Purpose |
+|-----|---------|
+| `/` | Spreadsheet UI (requires login) |
+| `/login` | Sign-in page |
+| `/telegram` | Raw WebSocket debug console |
 
-## Learn More
+Unauthenticated visits to `/` redirect to `/login`.
 
-To learn more about Next.js, take a look at the following resources:
+## Sign in
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. Wait for **Cloud sync** to show **Connected** on the login page.
+2. **QR login (default):** scan the pairing code with Telegram on your phone (`Settings → Devices → Link Desktop Device`).
+3. **Phone login (fallback):** click **Use recovery number instead**, enter phone, verification code, and 2FA password if enabled.
+4. On success you are redirected to the spreadsheet.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Session is saved in `teleproto_data/session.txt` (gitignored). You usually only log in once per machine.
 
-## Deploy on Vercel
+## Using the spreadsheet
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- **Sync badge** (under the document title): shows login/sync status. **All changes saved in Drive** means you are connected.
+- **File → Disconnect cloud sync…** logs out and returns you to `/login`.
+- **Sheet tabs** at the bottom are placeholder UI for now; Telegram chat integration is wired on the backend and ready for frontend work.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Messaging API (for developers)
+
+The frontend talks to Telegram over WebSocket (`ws://127.0.0.1:8765/ws`). Commands are JSON objects with a `method` field; responses are JSON updates with an `@type` field.
+
+**Frontend hook:**
+
+```tsx
+import { useTelegramApi } from './hooks/useTelegramApi';
+
+const api = useTelegramApi((update) => {
+  // handle updateNewMessage, updateDialogs, etc.
+});
+
+api.getDialogs();
+api.openChat(chatId);
+api.sendMessage(chatId, 'hello');
+api.getMessages(chatId, { limit: 30, offsetId: oldestId });
+```
+
+**Key commands:** `getDialogs`, `openChat`, `getMessages`, `sendMessage`, `editMessage`, `deleteMessages`, `markAsRead`, `logOut`
+
+**Live updates:** `updateNewMessage`, `updateMessageEdited`, `updateMessagesDeleted`, `updateMessageRead`
+
+Full TypeScript types: `lib/telegram-api-types.ts`  
+Backend handlers: `lib/telegram-bridge.ts`
+
+## Optional environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TELEGRAM_BRIDGE_PORT` | `8765` | WebSocket bridge port |
+| `TELEPROTO_DATA_DIR` | `./teleproto_data` | Session storage directory |
+| `NEXT_PUBLIC_TELEGRAM_WS_URL` | `ws://127.0.0.1:8765/ws` | WebSocket URL for the browser |
+
+## Project layout
+
+```
+app/
+  page.tsx          Spreadsheet UI
+  login/page.tsx    Login UI
+  providers.tsx     Auth provider (root layout)
+lib/
+  telegram-bridge.ts   Teleproto + WebSocket server
+  telegram-api-types.ts  API types
+hooks/
+  useTelegramAuth.ts   Auth state + WebSocket
+  useTelegramApi.ts    Typed messaging helpers
+components/
+  AuthGuard.tsx        Redirects unauthenticated users
+  SyncStatusBadge.tsx  Login status indicator
+  SheetFileMenu.tsx    File menu (logout)
+```
+
+## Scripts
+
+```bash
+npm run dev      # Development
+npm run build    # Production build
+npm run start    # Production server
+npm run lint     # ESLint
+```
+
+## Notes
+
+- `TELEGRAM_API_HASH` must stay in `.env` on the server only; never expose it in client code.
+- Logout clears the local session and invalidates the Telegram session.
+- `/telegram` is a developer page for inspecting raw WebSocket traffic during auth.
