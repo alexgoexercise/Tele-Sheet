@@ -40,7 +40,7 @@ const sessionPath = path.join(dataDir, 'session.txt');
 
 const wsClients = new Set<WebSocket>();
 
-let client: TelegramClient;
+let client: TelegramClient | undefined;
 let eventHandlersRegistered = false;
 let authInProgress = false;
 
@@ -100,8 +100,32 @@ function loadSession(): string {
 }
 
 function saveSession() {
+  if (!client) return;
   const session = client.session.save() as unknown as string;
   fs.writeFileSync(sessionPath, session, 'utf8');
+}
+
+const CREDENTIALS_ERROR =
+  'Telegram API credentials missing. Create a .env file with TELEGRAM_API_ID and TELEGRAM_API_HASH from https://my.telegram.org';
+
+function credentialsConfigured() {
+  return Boolean(apiId && apiHash);
+}
+
+async function ensureClientBootstrapped(): Promise<boolean> {
+  if (!credentialsConfigured()) {
+    broadcast({ '@type': 'error', message: CREDENTIALS_ERROR });
+    return false;
+  }
+  if (!client) {
+    try {
+      await bootstrapClient();
+    } catch (err) {
+      broadcast({ '@type': 'error', message: `Bridge bootstrap failed: ${String(err)}` });
+      return false;
+    }
+  }
+  return true;
 }
 
 function serializeUser(user: Api.User) {
@@ -192,12 +216,16 @@ function serializeChat(entity: object, chatId: string) {
   };
 }
 
-async function requireAuth(ws: WebSocket): Promise<boolean> {
+async function requireAuth(ws: WebSocket): Promise<TelegramClient | null> {
+  if (!client) {
+    sendToClient(ws, { '@type': 'error', message: CREDENTIALS_ERROR });
+    return null;
+  }
   if (!(await client.isUserAuthorized())) {
     sendToClient(ws, { '@type': 'error', message: 'not authorized' });
-    return false;
+    return null;
   }
-  return true;
+  return client;
 }
 
 function getPeerId(peer: Api.TypePeer | undefined): string | undefined {
@@ -209,11 +237,11 @@ function getPeerId(peer: Api.TypePeer | undefined): string | undefined {
 }
 
 async function resolveChat(chatId: string | number) {
-  return client.getEntity(String(chatId));
+  return getClient().getEntity(String(chatId));
 }
 
 function registerEventHandlers() {
-  if (eventHandlersRegistered) return;
+  if (eventHandlersRegistered || !client) return;
   eventHandlersRegistered = true;
 
   client.addEventHandler(async (event) => {
@@ -264,9 +292,17 @@ function registerEventHandlers() {
   }, new MessageRead({}));
 }
 
+function getClient(): TelegramClient {
+  if (!client) {
+    throw new Error(CREDENTIALS_ERROR);
+  }
+  return client;
+}
+
 async function ensureConnected() {
-  if (!client.connected) {
-    await client.connect();
+  const tg = getClient();
+  if (!tg.connected) {
+    await tg.connect();
   }
 }
 
@@ -277,12 +313,14 @@ function cancelQrAuth() {
 
 async function beginQrAuth() {
   if (authInProgress) return;
+  if (!(await ensureClientBootstrapped())) return;
   authInProgress = true;
 
   try {
     await ensureConnected();
+    const tg = getClient();
 
-    if (await client.isUserAuthorized()) {
+    if (await tg.isUserAuthorized()) {
       authState('authorizationStateReady');
       registerEventHandlers();
       return;
@@ -292,7 +330,7 @@ async function beginQrAuth() {
     qrAbortController = new AbortController();
     authState('authorizationStateWaitQrCode');
 
-    await client.signInUserWithQrCode(
+    await tg.signInUserWithQrCode(
       { apiId, apiHash },
       {
         qrCode: async (code) => {
@@ -322,7 +360,7 @@ async function beginQrAuth() {
     authState('authorizationStateReady');
     registerEventHandlers();
 
-    const me = await client.getMe();
+    const me = await tg.getMe();
     broadcast({ '@type': 'updateUser', user: serializeUser(me) });
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
@@ -337,12 +375,14 @@ async function beginQrAuth() {
 
 async function beginPhoneAuth() {
   if (authInProgress) return;
+  if (!(await ensureClientBootstrapped())) return;
   authInProgress = true;
 
   try {
     await ensureConnected();
+    const tg = getClient();
 
-    if (await client.isUserAuthorized()) {
+    if (await tg.isUserAuthorized()) {
       authState('authorizationStateReady');
       registerEventHandlers();
       return;
@@ -351,7 +391,7 @@ async function beginPhoneAuth() {
     cancelQrAuth();
     authState('authorizationStateWaitPhoneNumber');
 
-    await client.start({
+    await tg.start({
       phoneNumber: async () => {
         authState('authorizationStateWaitPhoneNumber');
         if (pendingPhone) {
@@ -384,7 +424,7 @@ async function beginPhoneAuth() {
     authState('authorizationStateReady');
     registerEventHandlers();
 
-    const me = await client.getMe();
+    const me = await tg.getMe();
     broadcast({ '@type': 'updateUser', user: serializeUser(me) });
   } catch (err) {
     broadcast({ '@type': 'error', message: String(err) });
@@ -439,11 +479,12 @@ async function bootstrapClient() {
   await ensureConnected();
 
   clientReady = true;
+  const tg = getClient();
 
-  if (await client.isUserAuthorized()) {
+  if (await tg.isUserAuthorized()) {
     authState('authorizationStateReady');
     registerEventHandlers();
-    const me = await client.getMe();
+    const me = await tg.getMe();
     broadcast({ '@type': 'updateUser', user: serializeUser(me) });
   } else {
     void beginQrAuth();
@@ -527,15 +568,17 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
     }
 
     case 'getMe': {
-      if (!(await requireAuth(ws))) return;
-      const me = await client.getMe();
+      const tg = await requireAuth(ws);
+      if (!tg) return;
+      const me = await tg.getMe();
       sendToClient(ws, { '@type': 'updateUser', user: serializeUser(me) });
       return;
     }
 
     case 'getDialogs': {
-      if (!(await requireAuth(ws))) return;
-      const dialogs = await client.getDialogs({ limit: cmd.limit ?? 50 });
+      const tg = await requireAuth(ws);
+      if (!tg) return;
+      const dialogs = await tg.getDialogs({ limit: cmd.limit ?? 50 });
       sendToClient(ws, {
         '@type': 'updateDialogs',
         dialogs: dialogs.map((d) => serializeDialog(d)),
@@ -544,7 +587,8 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
     }
 
     case 'getChat': {
-      if (!(await requireAuth(ws))) return;
+      const tg = await requireAuth(ws);
+      if (!tg) return;
       if (cmd.chat_id === undefined || cmd.chat_id === '') {
         sendToClient(ws, { '@type': 'error', message: 'getChat requires chat_id' });
         return;
@@ -558,13 +602,14 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
     }
 
     case 'getMessages': {
-      if (!(await requireAuth(ws))) return;
+      const tg = await requireAuth(ws);
+      if (!tg) return;
       if (cmd.chat_id === undefined || cmd.chat_id === '') {
         sendToClient(ws, { '@type': 'error', message: 'getMessages requires chat_id' });
         return;
       }
       const entity = await resolveChat(cmd.chat_id);
-      const messages = await client.getMessages(entity, {
+      const messages = await tg.getMessages(entity, {
         limit: cmd.limit ?? 30,
         offsetId: cmd.offset_id ?? 0,
         search: cmd.search,
@@ -578,7 +623,8 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
     }
 
     case 'sendMessage': {
-      if (!(await requireAuth(ws))) return;
+      const tg = await requireAuth(ws);
+      if (!tg) return;
       const text = cmd.message?.trim();
       if (!text) {
         sendToClient(ws, { '@type': 'error', message: 'sendMessage requires message' });
@@ -589,7 +635,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
         return;
       }
       const entity = await resolveChat(cmd.chat_id);
-      const sent = await client.sendMessage(entity, {
+      const sent = await tg.sendMessage(entity, {
         message: text,
         replyTo: cmd.reply_to,
       });
@@ -602,7 +648,8 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
     }
 
     case 'editMessage': {
-      if (!(await requireAuth(ws))) return;
+      const tg = await requireAuth(ws);
+      if (!tg) return;
       const text = cmd.message?.trim();
       if (!text || cmd.message_id == null) {
         sendToClient(ws, { '@type': 'error', message: 'editMessage requires message_id and message' });
@@ -613,7 +660,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
         return;
       }
       const entity = await resolveChat(cmd.chat_id);
-      const edited = await client.editMessage(entity, {
+      const edited = await tg.editMessage(entity, {
         message: cmd.message_id,
         text,
       });
@@ -625,7 +672,8 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
     }
 
     case 'deleteMessages': {
-      if (!(await requireAuth(ws))) return;
+      const tg = await requireAuth(ws);
+      if (!tg) return;
       if (!cmd.message_ids?.length) {
         sendToClient(ws, { '@type': 'error', message: 'deleteMessages requires message_ids' });
         return;
@@ -635,7 +683,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
         return;
       }
       const entity = await resolveChat(cmd.chat_id);
-      await client.deleteMessages(entity, cmd.message_ids, { revoke: cmd.revoke ?? true });
+      await tg.deleteMessages(entity, cmd.message_ids, { revoke: cmd.revoke ?? true });
       sendToClient(ws, {
         '@type': 'updateMessagesDeleted',
         chat_id: String(cmd.chat_id),
@@ -645,13 +693,14 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
     }
 
     case 'markAsRead': {
-      if (!(await requireAuth(ws))) return;
+      const tg = await requireAuth(ws);
+      if (!tg) return;
       if (cmd.chat_id === undefined || cmd.chat_id === '') {
         sendToClient(ws, { '@type': 'error', message: 'markAsRead requires chat_id' });
         return;
       }
       const entity = await resolveChat(cmd.chat_id);
-      const success = await client.markAsRead(
+      const success = await tg.markAsRead(
         entity,
         cmd.message_id != null ? cmd.message_id : undefined,
       );
@@ -664,7 +713,8 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
     }
 
     case 'openChat': {
-      if (!(await requireAuth(ws))) return;
+      const tg = await requireAuth(ws);
+      if (!tg) return;
       if (cmd.chat_id === undefined || cmd.chat_id === '') {
         sendToClient(ws, { '@type': 'error', message: 'openChat requires chat_id' });
         return;
@@ -674,7 +724,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
         '@type': 'updateChat',
         chat: serializeChat(entity, String(cmd.chat_id)),
       });
-      const messages = await client.getMessages(entity, { limit: cmd.limit ?? 30 });
+      const messages = await tg.getMessages(entity, { limit: cmd.limit ?? 30 });
       sendToClient(ws, {
         '@type': 'updateMessages',
         chat_id: String(cmd.chat_id),
@@ -720,6 +770,9 @@ function startHttpServer() {
     wsClients.add(ws);
 
     void (async () => {
+      if (!credentialsConfigured()) {
+        sendToClient(ws, { '@type': 'error', message: CREDENTIALS_ERROR });
+      }
       sendToClient(ws, await getAuthSnapshot());
       if (lastQrUpdate && currentAuthState === 'authorizationStateWaitQrCode') {
         sendToClient(ws, lastQrUpdate);
