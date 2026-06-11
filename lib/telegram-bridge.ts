@@ -56,6 +56,25 @@ let clientReady = false;
 let qrAbortController: AbortController | null = null;
 let qrPasswordResolve: ((value: string) => void) | null = null;
 let lastQrUpdate: TdUpdate | null = null;
+let selfUserId: string | undefined;
+
+const SAVED_MESSAGES_TITLE = 'Saved Messages';
+
+function setSelfUserFromMe(user: Api.User) {
+  selfUserId = user.id?.toString();
+}
+
+function isSavedMessagesChat(chatId: string, entity?: object): boolean {
+  if (!selfUserId) return false;
+  if (chatId === selfUserId) return true;
+  if (entity instanceof Api.User && entity.self) return true;
+  return false;
+}
+
+function displayChatTitle(chatId: string, fallback: string, entity?: object): string {
+  if (isSavedMessagesChat(chatId, entity)) return SAVED_MESSAGES_TITLE;
+  return fallback;
+}
 
 function broadcast(update: TdUpdate) {
   const payload = JSON.stringify(update);
@@ -142,10 +161,11 @@ function serializeUser(user: Api.User) {
 
 function serializeDialog(dialog: Dialog) {
   const chatId = dialog.id?.toString() ?? '';
+  const fallbackTitle = dialog.title ?? dialog.name ?? '';
   return {
     id: chatId,
     chat_id: chatId,
-    title: dialog.title ?? dialog.name ?? '',
+    title: displayChatTitle(chatId, fallbackTitle, dialog.entity),
     unread_count: dialog.unreadCount ?? 0,
     last_message_date: dialog.date ?? 0,
     is_group: dialog.isGroup,
@@ -235,7 +255,7 @@ function serializeChat(entity: object) {
   };
   const chatId = getPeerId(entity as Parameters<typeof getPeerId>[0]);
 
-  const title = e.title
+  const fallbackTitle = e.title
     ? e.title
     : e.firstName
       ? [e.firstName, e.lastName].filter(Boolean).join(' ')
@@ -243,7 +263,7 @@ function serializeChat(entity: object) {
 
   return {
     id: chatId,
-    title,
+    title: displayChatTitle(chatId, fallbackTitle, entity),
     username: e.username ?? undefined,
     is_group: e.className === 'Chat' || (e.className === 'Channel' && !e.broadcast),
     is_user: e.className === 'User',
@@ -393,6 +413,7 @@ async function beginQrAuth() {
     registerEventHandlers();
 
     const me = await tg.getMe();
+    setSelfUserFromMe(me);
     broadcast({ '@type': 'updateUser', user: serializeUser(me) });
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
@@ -457,6 +478,7 @@ async function beginPhoneAuth() {
     registerEventHandlers();
 
     const me = await tg.getMe();
+    setSelfUserFromMe(me);
     broadcast({ '@type': 'updateUser', user: serializeUser(me) });
   } catch (err) {
     broadcast({ '@type': 'error', message: String(err) });
@@ -498,6 +520,7 @@ async function handleLogout() {
   clientReady = true;
 
   lastQrUpdate = null;
+  selfUserId = undefined;
   broadcast({ '@type': 'updateLoggedOut' });
   void beginQrAuth();
 }
@@ -517,6 +540,7 @@ async function bootstrapClient() {
     authState('authorizationStateReady');
     registerEventHandlers();
     const me = await tg.getMe();
+    setSelfUserFromMe(me);
     broadcast({ '@type': 'updateUser', user: serializeUser(me) });
   } else {
     void beginQrAuth();
@@ -603,6 +627,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
       const tg = await requireAuth(ws);
       if (!tg) return;
       const me = await tg.getMe();
+      setSelfUserFromMe(me);
       sendToClient(ws, { '@type': 'updateUser', user: serializeUser(me) });
       return;
     }
@@ -820,6 +845,7 @@ function startHttpServer() {
       if (clientReady && client?.connected && (await client.isUserAuthorized())) {
         try {
           const me = await client.getMe();
+          setSelfUserFromMe(me);
           sendToClient(ws, { '@type': 'updateUser', user: serializeUser(me) });
         } catch {
           // ignore snapshot user errors

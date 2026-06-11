@@ -5,15 +5,24 @@ import { useParams } from 'next/navigation';
 import { Loader2 } from 'lucide-react';
 import GridRow from '../../../../components/sheet/GridRow';
 import SheetShell from '../../../../components/sheet/SheetShell';
+import { useTelegramAuthContext } from '../../../../components/TelegramAuthProvider';
 import { useChatMessages } from '../../../../hooks/useChatMessages';
-import { formatMessageTime, messageSenderLabel } from '../../../../lib/chat';
+import {
+  formatMessageTime,
+  isSavedMessagesChat,
+  messageSenderLabel,
+  SAVED_MESSAGES_TITLE,
+} from '../../../../lib/chat';
 
 export default function ChatThreadPage() {
   const params = useParams();
   const chatId = decodeURIComponent(String(params.chatId ?? ''));
+  const { user } = useTelegramAuthContext();
   const { messages, chatTitle, loading, error, draft, setDraft, send } = useChatMessages(chatId);
 
-  const title = chatTitle || `Chat ${chatId}`;
+  const title = isSavedMessagesChat(chatId, user?.id)
+    ? SAVED_MESSAGES_TITLE
+    : chatTitle || `Chat ${chatId}`;
 
   return (
     <SheetShell

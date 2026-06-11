@@ -4,11 +4,13 @@ import { useRouter } from 'next/navigation';
 import { Loader2 } from 'lucide-react';
 import GridRow from '../../../components/sheet/GridRow';
 import SheetShell from '../../../components/sheet/SheetShell';
+import { useTelegramAuthContext } from '../../../components/TelegramAuthProvider';
 import { useDialogs } from '../../../hooks/useDialogs';
-import { dialogTypeLabel, formatMessageTime } from '../../../lib/chat';
+import { dialogDisplayTitle, dialogTypeLabel, formatMessageTime } from '../../../lib/chat';
 
 export default function ChatsPage() {
   const router = useRouter();
+  const { user } = useTelegramAuthContext();
   const { dialogs, loading, error, refresh } = useDialogs();
 
   return (
@@ -62,7 +64,9 @@ export default function ChatsPage() {
             n={rowNum}
             onClick={() => router.push(href)}
           >
-            <span className="font-medium text-gray-800">{dialog.title || chatId}</span>
+            <span className="font-medium text-gray-800">
+              {dialogDisplayTitle(dialog, user?.id) || chatId}
+            </span>
             <span className="text-gray-600 truncate">
               {dialogTypeLabel(dialog)} · last activity {formatMessageTime(dialog.last_message_date)}
             </span>
