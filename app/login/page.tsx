@@ -24,6 +24,7 @@ import {
   Undo,
 } from 'lucide-react';
 import SyncStatusBadge from '../../components/SyncStatusBadge';
+import SheetProfileMenu from '../../components/SheetProfileMenu';
 import { useTelegramAuthContext } from '../../components/TelegramAuthProvider';
 
 const LABEL_W = 160;
@@ -38,7 +39,6 @@ export default function LoginPage() {
     step,
     connected,
     error,
-    user,
     submitting,
     qrUrl,
     passwordHint,
@@ -92,10 +92,6 @@ export default function LoginPage() {
     startQrAuth();
   };
 
-  const displayName = user
-    ? [user.first_name, user.last_name].filter(Boolean).join(' ') || user.username || 'User'
-    : 'Guest';
-
   const showQr = mode === 'qr' && step !== 'password';
   const showPhone = mode === 'phone' && step !== 'password';
   const showPassword = step === 'password';
@@ -131,9 +127,7 @@ export default function LoginPage() {
             <Share className="w-4 h-4" />
             Share
           </button>
-          <div className="w-8 h-8 bg-purple-600 rounded-full flex items-center justify-center text-white font-bold text-xs">
-            {displayName.charAt(0).toUpperCase()}
-          </div>
+          <SheetProfileMenu interactive={false} />
         </div>
       </div>
 

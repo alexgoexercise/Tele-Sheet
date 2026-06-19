@@ -5,8 +5,8 @@ import { createPortal } from 'react-dom';
 import AuthGuard from '../components/AuthGuard';
 import DeleteSheetModal from '../components/DeleteSheetModal';
 import SheetFileMenu from '../components/SheetFileMenu';
+import SheetProfileMenu from '../components/SheetProfileMenu';
 import SyncStatusBadge from '../components/SyncStatusBadge';
-import { useTelegramAuthContext } from '../components/TelegramAuthProvider';
 import { 
   ChevronDown, 
   Plus, 
@@ -100,11 +100,6 @@ export default function App() {
 }
 
 function SpreadsheetApp() {
-  const { user } = useTelegramAuthContext();
-  const userInitial = user
-    ? (user.first_name?.charAt(0) || user.username?.charAt(0) || 'U').toUpperCase()
-    : 'U';
-
   // Sheets State
   const [sheets, setSheets] = useState<Sheet[]>([
     { id: '1', name: 'Sheet1', data: {}, colWidths: {}, rowHeights: {} },
@@ -391,9 +386,7 @@ function SpreadsheetApp() {
             <Share className="w-4 h-4" />
             Share
           </button>
-          <div className="w-8 h-8 bg-purple-600 rounded-full flex items-center justify-center text-white font-bold">
-            {userInitial}
-          </div>
+          <SheetProfileMenu />
         </div>
       </div>
 

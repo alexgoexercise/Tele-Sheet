@@ -20,8 +20,8 @@ import {
   Undo,
 } from 'lucide-react';
 import SheetFileMenu from '../SheetFileMenu';
+import SheetProfileMenu from '../SheetProfileMenu';
 import SyncStatusBadge from '../SyncStatusBadge';
-import { useTelegramAuthContext } from '../TelegramAuthProvider';
 import GridRow, { SHEET_LABEL_W, SHEET_STATUS_W } from './GridRow';
 
 const TOOLBAR_ICONS = [
@@ -66,11 +66,6 @@ export default function SheetShell({
   children,
   tabs,
 }: SheetShellProps) {
-  const { user } = useTelegramAuthContext();
-  const displayName = user
-    ? [user.first_name, user.last_name].filter(Boolean).join(' ') || user.username || 'User'
-    : 'Guest';
-
   return (
     <div className="flex flex-col h-screen bg-white text-sm font-sans">
       <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 shrink-0">
@@ -100,9 +95,7 @@ export default function SheetShell({
             <Share className="w-4 h-4" />
             Share
           </button>
-          <div className="w-8 h-8 bg-purple-600 rounded-full flex items-center justify-center text-white font-bold text-xs">
-            {displayName.charAt(0).toUpperCase()}
-          </div>
+          <SheetProfileMenu />
         </div>
       </div>
 
