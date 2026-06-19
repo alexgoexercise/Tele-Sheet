@@ -15,16 +15,16 @@ npm install
 cp .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` and set your Telegram API credentials (required):
 
 ```
 TELEGRAM_API_ID=your_numeric_id
 TELEGRAM_API_HASH=your_hash
 ```
 
-Here, the `your_numeric_id` and `your_hash` is applied through [https://core.telegram.org/](https://core.telegram.org/).
+Get these from [my.telegram.org](https://my.telegram.org) → API development tools. See the [obtaining API ID guide](https://core.telegram.org/api/obtaining_api_id) for step-by-step instructions.
 
-The tutorial of application can be found here: [https://core.telegram.org/api/obtaining_api_id](https://core.telegram.org/api/obtaining_api_id_)
+`.env.example` lists all supported variables. Only `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` are required for local development; the rest have sensible defaults.
 
 ```bash
 npm run dev
