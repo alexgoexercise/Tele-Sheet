@@ -2,7 +2,6 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { URL } from 'node:url';
-import bigInt from 'big-integer';
 import { Api, TelegramClient, events, sessions } from 'teleproto';
 import { returnBigInt } from 'teleproto/Helpers';
 import type { Dialog } from 'teleproto/tl/custom/dialog.js';
@@ -339,26 +338,124 @@ function serializeStickerSet(set: Api.StickerSet) {
   };
 }
 
+function documentThumbSortSize(thumb: Api.TypePhotoSize): number {
+  if (thumb instanceof Api.PhotoStrippedSize) return thumb.bytes.length;
+  if (thumb instanceof Api.PhotoCachedSize) return thumb.bytes.length;
+  if (thumb instanceof Api.PhotoSize) return thumb.size;
+  if (thumb instanceof Api.PhotoSizeProgressive) return Math.max(...thumb.sizes);
+  if (thumb instanceof Api.VideoSize) return thumb.size;
+  return 0;
+}
+
+function imageBytesToDataUrl(bytes: Buffer): string {
+  let mime = 'image/jpeg';
+  if (bytes[0] === 0x89 && bytes[1] === 0x50) mime = 'image/png';
+  else if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
+    mime = 'image/webp';
+  }
+  return `data:${mime};base64,${bytes.toString('base64')}`;
+}
+
+function imageBytesContentType(bytes: Buffer): string {
+  if (bytes[0] === 0x89 && bytes[1] === 0x50) return 'image/png';
+  if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
+    return 'image/webp';
+  }
+  return 'image/jpeg';
+}
+
+async function downloadBestDocumentThumbBytes(
+  tg: TelegramClient,
+  doc: Api.Document,
+): Promise<Buffer | undefined> {
+  const media = new Api.MessageMediaDocument({ document: doc });
+  const thumbs = (doc.thumbs ?? []).filter((t) => !(t instanceof Api.PhotoPathSize));
+  if (thumbs.length) {
+    thumbs.sort((a, b) => documentThumbSortSize(a) - documentThumbSortSize(b));
+    for (let i = thumbs.length - 1; i >= 0; i--) {
+      try {
+        const buffer = await tg.downloadMedia(media, { thumb: i });
+        if (buffer) return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as string);
+      } catch {
+        // try next thumb
+      }
+    }
+    for (let i = thumbs.length - 1; i >= 0; i--) {
+      try {
+        const buffer = await tg.downloadMedia(media, { thumb: thumbs[i] });
+        if (buffer) return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as string);
+      } catch {
+        // try next thumb object
+      }
+    }
+  }
+  for (const sizeType of ['w', 'x', 'm', 's'] as const) {
+    try {
+      const buffer = await tg.downloadMedia(media, { thumb: sizeType });
+      if (buffer) return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as string);
+    } catch {
+      // try next size
+    }
+  }
+  return undefined;
+}
+
+async function serializePickerGifFromDocument(
+  tg: TelegramClient,
+  doc: Api.Document,
+  id: string,
+  queryId?: string,
+) {
+  const serialized = serializeDocument(doc);
+  return {
+    id,
+    alt: serialized.alt || 'GIF',
+    access_hash: serialized.access_hash,
+    file_reference: serialized.file_reference,
+    mime_type: serialized.mime_type || 'video/mp4',
+    query_id: queryId,
+    thumb_base64: await downloadDocumentThumb(tg, doc),
+  };
+}
+
+async function serializePickerGifFromPhoto(
+  tg: TelegramClient,
+  photo: Api.Photo,
+  id: string,
+  queryId?: string,
+) {
+  const serialized = serializePhoto(photo);
+  const thumbBytes = await downloadPhotoThumbBytes(tg, photo);
+  return {
+    id,
+    alt: 'GIF',
+    access_hash: serialized.access_hash,
+    file_reference: serialized.file_reference,
+    dc_id: serialized.dc_id,
+    mime_type: 'image/jpeg',
+    query_id: queryId,
+    thumb_base64: thumbBytes ? imageBytesToDataUrl(thumbBytes) : undefined,
+  };
+}
+
 async function serializeStickerSetWithThumb(tg: TelegramClient, set: Api.StickerSet) {
   const base = serializeStickerSet(set);
   if (set.thumbs?.length) {
     try {
-      const media = new Api.MessageMediaDocument({
-        document: new Api.Document({
-          id: set.thumbDocumentId ?? bigInt(0),
-          accessHash: set.accessHash,
-          fileReference: Buffer.alloc(0),
-          date: 0,
-          mimeType: 'image/webp',
-          size: bigInt(0),
-          dcId: set.thumbDcId ?? 1,
-          attributes: [],
-        }),
+      const doc = new Api.Document({
+        id: set.thumbDocumentId ?? returnBigInt(0),
+        accessHash: set.accessHash,
+        fileReference: Buffer.alloc(0),
+        date: 0,
+        mimeType: 'image/webp',
+        size: returnBigInt(0),
+        dcId: set.thumbDcId ?? 1,
+        attributes: [],
+        thumbs: set.thumbs,
       });
-      const buffer = await tg.downloadMedia(media, { thumb: 0 });
-      if (buffer) {
-        const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as string);
-        return { ...base, thumb_base64: `data:image/webp;base64,${bytes.toString('base64')}` };
+      const bytes = await downloadBestDocumentThumbBytes(tg, doc);
+      if (bytes) {
+        return { ...base, thumb_base64: imageBytesToDataUrl(bytes) };
       }
     } catch {
       // thumb optional
@@ -369,11 +466,9 @@ async function serializeStickerSetWithThumb(tg: TelegramClient, set: Api.Sticker
 
 async function downloadDocumentThumb(tg: TelegramClient, doc: Api.Document) {
   try {
-    const media = new Api.MessageMediaDocument({ document: doc });
-    const buffer = await tg.downloadMedia(media, { thumb: 0 });
-    if (!buffer) return undefined;
-    const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as string);
-    return `data:image/webp;base64,${bytes.toString('base64')}`;
+    const bytes = await downloadBestDocumentThumbBytes(tg, doc);
+    if (!bytes) return undefined;
+    return imageBytesToDataUrl(bytes);
   } catch {
     return undefined;
   }
@@ -383,12 +478,64 @@ function getGifDocument(message: MessageLike): Api.Document | undefined {
   const media = message.media;
   if (media instanceof Api.MessageMediaDocument && media.document instanceof Api.Document) {
     const doc = media.document;
-    const isSticker = doc.attributes?.some((a) => a instanceof Api.DocumentAttributeSticker);
-    const isGif =
-      doc.attributes?.some((a) => a instanceof Api.DocumentAttributeAnimated) ||
-      (doc.mimeType === 'video/mp4' &&
-        doc.attributes?.some((a) => a instanceof Api.DocumentAttributeVideo));
-    if (!isSticker && isGif) return doc;
+    if (doc.attributes?.some((a) => a instanceof Api.DocumentAttributeSticker)) return undefined;
+    if (isGifDocument(doc)) return doc;
+  }
+  return undefined;
+}
+
+/** Telegram animations: legacy animated attribute or silent short mp4 (not round video notes). */
+function isGifDocument(doc: Api.Document): boolean {
+  if (doc.attributes?.some((a) => a instanceof Api.DocumentAttributeAnimated)) {
+    return true;
+  }
+  const videoAttr = doc.attributes?.find(
+    (a): a is Api.DocumentAttributeVideo => a instanceof Api.DocumentAttributeVideo,
+  );
+  if (!videoAttr || doc.mimeType !== 'video/mp4') return false;
+  return Boolean(videoAttr.nosound) && !videoAttr.roundMessage;
+}
+
+function getPhotoFromMessage(message: MessageLike): Api.Photo | undefined {
+  const media = message.media;
+  if (media instanceof Api.MessageMediaPhoto && media.photo instanceof Api.Photo) {
+    return media.photo;
+  }
+  return undefined;
+}
+
+function getImageDocument(message: MessageLike): Api.Document | undefined {
+  const media = message.media;
+  if (!(media instanceof Api.MessageMediaDocument) || !(media.document instanceof Api.Document)) {
+    return undefined;
+  }
+  const doc = media.document;
+  if (doc.attributes?.some((a) => a instanceof Api.DocumentAttributeSticker)) return undefined;
+  if (isGifDocument(doc)) return undefined;
+  const mime = doc.mimeType ?? '';
+  if (mime === 'application/x-tgsticker') return undefined;
+  if (mime.startsWith('image/')) return doc;
+  return undefined;
+}
+
+function serializePhoto(photo: Api.Photo) {
+  return {
+    id: photo.id?.toString() ?? '',
+    access_hash: photo.accessHash?.toString() ?? '',
+    file_reference: Buffer.from(photo.fileReference ?? []).toString('base64'),
+    dc_id: photo.dcId?.toString() ?? '1',
+  };
+}
+
+async function downloadPhotoThumbBytes(tg: TelegramClient, photo: Api.Photo): Promise<Buffer | undefined> {
+  const media = new Api.MessageMediaPhoto({ photo });
+  for (const sizeType of ['w', 'x', 'm'] as const) {
+    try {
+      const buffer = await tg.downloadMedia(media, { thumb: sizeType });
+      if (buffer) return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as string);
+    } catch {
+      // try next size
+    }
   }
   return undefined;
 }
@@ -405,7 +552,10 @@ async function resolveGifSearchBot(tg: TelegramClient) {
 }
 
 function webDocumentUrl(doc: Api.TypeWebDocument | undefined) {
-  return doc instanceof Api.WebDocument ? doc.url : undefined;
+  if (doc instanceof Api.WebDocument || doc instanceof Api.WebDocumentNoProxy) {
+    return doc.url;
+  }
+  return undefined;
 }
 
 function getStickerDocument(message: MessageLike): Api.Document | undefined {
@@ -422,8 +572,8 @@ function getStickerDocument(message: MessageLike): Api.Document | undefined {
 
 function inputDocumentFromRef(ref: { id: string; access_hash: string; file_reference: string }) {
   return new Api.InputDocument({
-    id: bigInt(ref.id),
-    accessHash: bigInt(ref.access_hash),
+    id: returnBigInt(ref.id),
+    accessHash: returnBigInt(ref.access_hash),
     fileReference: Buffer.from(ref.file_reference, 'base64'),
   });
 }
@@ -506,14 +656,48 @@ async function serializeMessage(message: MessageLike, tg?: TelegramClient) {
     const thumb_base64 = tg ? await downloadDocumentThumb(tg, gifDoc) : undefined;
     return {
       ...base,
-      text: base.text || gif.alt || 'GIF',
+      text: base.text,
       media_type: 'gif' as const,
       gif: {
         id: gif.id,
         access_hash: gif.access_hash,
         file_reference: gif.file_reference,
         alt: gif.alt || 'GIF',
-        mime_type: gif.mime_type,
+        mime_type: gif.mime_type || 'video/mp4',
+        thumb_base64,
+      },
+    };
+  }
+
+  const photoMedia = getPhotoFromMessage(message);
+  if (photoMedia) {
+    const photo = serializePhoto(photoMedia);
+    const thumbBytes = tg ? await downloadPhotoThumbBytes(tg, photoMedia) : undefined;
+    return {
+      ...base,
+      text: base.text,
+      media_type: 'photo' as const,
+      photo: {
+        ...photo,
+        mime_type: 'image/jpeg',
+        thumb_base64: thumbBytes ? imageBytesToDataUrl(thumbBytes) : undefined,
+      },
+    };
+  }
+
+  const imageDoc = getImageDocument(message);
+  if (imageDoc) {
+    const serialized = serializeDocument(imageDoc);
+    const thumb_base64 = tg ? await downloadDocumentThumb(tg, imageDoc) : undefined;
+    return {
+      ...base,
+      text: base.text,
+      media_type: 'photo' as const,
+      photo: {
+        id: serialized.id,
+        access_hash: serialized.access_hash,
+        file_reference: serialized.file_reference,
+        mime_type: serialized.mime_type || 'image/jpeg',
         thumb_base64,
       },
     };
@@ -1370,17 +1554,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
         const gifs = await Promise.all(
           result.gifs
             .filter((doc): doc is Api.Document => doc instanceof Api.Document)
-            .map(async (doc) => {
-              const serialized = serializeDocument(doc);
-              return {
-                id: serialized.id,
-                access_hash: serialized.access_hash,
-                file_reference: serialized.file_reference,
-                alt: serialized.alt || 'GIF',
-                mime_type: serialized.mime_type,
-                thumb_base64: await downloadDocumentThumb(tg, doc),
-              };
-            }),
+            .map((doc) => serializePickerGifFromDocument(tg, doc, doc.id?.toString() ?? '')),
         );
         cachedSavedGifs = gifs;
         sendToClient(ws, { '@type': 'updateSavedGifs', gifs });
@@ -1407,37 +1581,33 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
           sendToClient(ws, { '@type': 'updateGifSearch', gifs: [], next_offset: undefined });
           return;
         }
+        const queryId = result.queryId?.toString();
         const gifs = await Promise.all(
           result.results
             .filter(
               (r): r is Api.BotInlineResult | Api.BotInlineMediaResult =>
                 r instanceof Api.BotInlineResult || r instanceof Api.BotInlineMediaResult,
             )
+            .filter((r) => r.type === 'gif' || r.type === 'mpeg4_gif')
             .map(async (r) => {
               if (r instanceof Api.BotInlineMediaResult && r.document instanceof Api.Document) {
-                const serialized = serializeDocument(r.document);
-                return {
-                  id: r.id,
-                  alt: serialized.alt || 'GIF',
-                  access_hash: serialized.access_hash,
-                  file_reference: serialized.file_reference,
-                  mime_type: serialized.mime_type,
-                  query_id: result.queryId?.toString(),
-                  thumb_base64: await downloadDocumentThumb(tg, r.document),
-                };
+                return serializePickerGifFromDocument(tg, r.document, r.id, queryId);
+              }
+              if (r instanceof Api.BotInlineMediaResult && r.photo instanceof Api.Photo) {
+                return serializePickerGifFromPhoto(tg, r.photo, r.id, queryId);
               }
               if (r instanceof Api.BotInlineResult) {
                 return {
                   id: r.id,
-                  alt: 'GIF',
-                  query_id: result.queryId?.toString(),
+                  alt: r.title || r.description || 'GIF',
+                  query_id: queryId,
                   thumb_url: webDocumentUrl(r.thumb) ?? webDocumentUrl(r.content),
                 };
               }
               return {
                 id: r.id,
                 alt: 'GIF',
-                query_id: result.queryId?.toString(),
+                query_id: queryId,
               };
             }),
         );
@@ -1492,7 +1662,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
         const updates = await tg.invoke(
           new Api.messages.SendInlineBotResult({
             peer: entity,
-            queryId: bigInt(cmd.gif.query_id),
+            queryId: returnBigInt(cmd.gif.query_id),
             id: cmd.gif.result_id,
           }),
         );
@@ -1544,6 +1714,46 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
   }
 }
 
+async function handleRemoteFetch(req: http.IncomingMessage, res: http.ServerResponse) {
+  try {
+    const url = new URL(req.url ?? '', 'http://127.0.0.1');
+    const target = url.searchParams.get('url');
+    if (!target) {
+      res.writeHead(400);
+      res.end('missing url');
+      return;
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(target);
+    } catch {
+      res.writeHead(400);
+      res.end('invalid url');
+      return;
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      res.writeHead(400);
+      res.end('unsupported protocol');
+      return;
+    }
+    const response = await fetch(target);
+    if (!response.ok) {
+      res.writeHead(response.status);
+      res.end('upstream error');
+      return;
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    res.writeHead(200, {
+      'Content-Type': response.headers.get('content-type') || 'image/jpeg',
+      'Cache-Control': 'private, max-age=3600',
+    });
+    res.end(bytes);
+  } catch {
+    res.writeHead(502);
+    res.end('fetch failed');
+  }
+}
+
 async function handleStickerPreview(req: http.IncomingMessage, res: http.ServerResponse) {
   try {
     const tg = bridgeClient();
@@ -1562,24 +1772,135 @@ async function handleStickerPreview(req: http.IncomingMessage, res: http.ServerR
       return;
     }
     const doc = new Api.Document({
-      id: bigInt(id),
-      accessHash: bigInt(accessHash),
+      id: returnBigInt(id),
+      accessHash: returnBigInt(accessHash),
       fileReference: Buffer.from(fileReference, 'base64'),
       date: 0,
       mimeType: 'image/webp',
-      size: bigInt(0),
+      size: returnBigInt(0),
+      dcId: 0,
+      attributes: [],
+    });
+    const bytes = await downloadBestDocumentThumbBytes(tg, doc);
+    if (!bytes) {
+      res.writeHead(404);
+      res.end('not found');
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': imageBytesContentType(bytes),
+      'Cache-Control': 'private, max-age=3600',
+    });
+    res.end(bytes);
+  } catch {
+    res.writeHead(500);
+    res.end('error');
+  }
+}
+
+async function handleDocumentMedia(req: http.IncomingMessage, res: http.ServerResponse) {
+  try {
+    const tg = bridgeClient();
+    if (!tg || !(await tg.isUserAuthorized())) {
+      res.writeHead(401);
+      res.end('unauthorized');
+      return;
+    }
+    const url = new URL(req.url ?? '', 'http://127.0.0.1');
+    const id = url.searchParams.get('id');
+    const accessHash = url.searchParams.get('access_hash');
+    const fileReference = url.searchParams.get('file_reference');
+    const mimeType = url.searchParams.get('mime_type') || 'video/mp4';
+    if (!id || !accessHash || !fileReference) {
+      res.writeHead(400);
+      res.end('missing params');
+      return;
+    }
+    const doc = new Api.Document({
+      id: returnBigInt(id),
+      accessHash: returnBigInt(accessHash),
+      fileReference: Buffer.from(fileReference, 'base64'),
+      date: 0,
+      mimeType,
+      size: returnBigInt(0),
       dcId: 0,
       attributes: [],
     });
     const media = new Api.MessageMediaDocument({ document: doc });
-    const buffer = await tg.downloadMedia(media, { thumb: 0 });
+    const buffer = await tg.downloadMedia(media);
     if (!buffer) {
       res.writeHead(404);
       res.end('not found');
       return;
     }
     const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as string);
-    res.writeHead(200, { 'Content-Type': 'image/webp', 'Cache-Control': 'private, max-age=3600' });
+    res.writeHead(200, {
+      'Content-Type': mimeType,
+      'Cache-Control': 'private, max-age=3600',
+    });
+    res.end(bytes);
+  } catch {
+    res.writeHead(500);
+    res.end('error');
+  }
+}
+
+async function handlePhotoMedia(req: http.IncomingMessage, res: http.ServerResponse) {
+  try {
+    const tg = bridgeClient();
+    if (!tg || !(await tg.isUserAuthorized())) {
+      res.writeHead(401);
+      res.end('unauthorized');
+      return;
+    }
+    const url = new URL(req.url ?? '', 'http://127.0.0.1');
+    const id = url.searchParams.get('id');
+    const accessHash = url.searchParams.get('access_hash');
+    const fileReference = url.searchParams.get('file_reference');
+    const dcId = Number(url.searchParams.get('dc_id') || '1');
+    const mimeType = url.searchParams.get('mime_type') || 'image/jpeg';
+    if (!id || !accessHash || !fileReference) {
+      res.writeHead(400);
+      res.end('missing params');
+      return;
+    }
+
+    let bytes: Buffer | undefined;
+    if (url.searchParams.has('dc_id')) {
+      const photo = new Api.Photo({
+        id: returnBigInt(id),
+        accessHash: returnBigInt(accessHash),
+        fileReference: Buffer.from(fileReference, 'base64'),
+        date: 0,
+        dcId,
+        sizes: [],
+      });
+      bytes = await downloadPhotoThumbBytes(tg, photo);
+    } else {
+      const doc = new Api.Document({
+        id: returnBigInt(id),
+        accessHash: returnBigInt(accessHash),
+        fileReference: Buffer.from(fileReference, 'base64'),
+        date: 0,
+        mimeType,
+        size: returnBigInt(0),
+        dcId: 0,
+        attributes: [],
+      });
+      const media = new Api.MessageMediaDocument({ document: doc });
+      const buffer = await tg.downloadMedia(media);
+      if (buffer) bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as string);
+    }
+
+    if (!bytes) {
+      res.writeHead(404);
+      res.end('not found');
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': url.searchParams.has('dc_id') ? imageBytesContentType(bytes) : mimeType,
+      'Cache-Control': 'private, max-age=3600',
+    });
     res.end(bytes);
   } catch {
     res.writeHead(500);
@@ -1605,8 +1926,23 @@ function startHttpServer() {
       return;
     }
 
+    if (req.url?.startsWith('/fetch')) {
+      void handleRemoteFetch(req, res);
+      return;
+    }
+
     if (req.url?.startsWith('/sticker')) {
       void handleStickerPreview(req, res);
+      return;
+    }
+
+    if (req.url?.startsWith('/media')) {
+      void handleDocumentMedia(req, res);
+      return;
+    }
+
+    if (req.url?.startsWith('/photo')) {
+      void handlePhotoMedia(req, res);
       return;
     }
 

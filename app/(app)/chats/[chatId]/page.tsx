@@ -115,8 +115,13 @@ function ChatThreadContent({ chatId }: { chatId: string }) {
         {messages.map((message, i) => {
           const rowNum = i + (loading ? 6 : 4);
           const tall =
-            (message.media_type === 'sticker' || message.media_type === 'gif') && showStickerEmoji
-              ? 72
+            (message.media_type === 'sticker' ||
+              message.media_type === 'gif' ||
+              message.media_type === 'photo') &&
+            showStickerEmoji
+              ? message.media_type === 'gif' || message.media_type === 'photo'
+                ? 140
+                : 72
               : message.text.length > 80
                 ? 48
                 : 28;

@@ -16,8 +16,91 @@ import {
 import { getFavoriteEmojis, getRecentStickers, toggleFavoriteEmoji, isFavoriteEmoji } from '../../lib/insert-favorites';
 import { useSheetCompose } from '../../lib/sheet-compose';
 import type { TelegramGif, TelegramSticker } from '../../lib/telegram-api-types';
+import {
+  documentMediaUrl,
+  isVideoGif,
+  photoMediaUrl,
+  proxiedRemoteUrl,
+} from '../../lib/sticker-media';
 
 type MainTab = 'emoji' | 'favorites' | 'stickers' | 'gif';
+
+function GifPickerThumb({ gif }: { gif: TelegramGif }) {
+  const [failedPrimary, setFailedPrimary] = useState(false);
+
+  if (!failedPrimary && gif.access_hash && gif.file_reference) {
+    if (gif.dc_id) {
+      return (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={photoMediaUrl({
+            id: gif.id,
+            access_hash: gif.access_hash,
+            file_reference: gif.file_reference,
+            dc_id: gif.dc_id,
+            mime_type: gif.mime_type || 'image/jpeg',
+          })}
+          alt=""
+          className="h-full w-full object-contain rounded"
+          onError={() => setFailedPrimary(true)}
+        />
+      );
+    }
+
+    const mediaUrl = documentMediaUrl({
+      id: gif.id,
+      access_hash: gif.access_hash,
+      file_reference: gif.file_reference,
+      mime_type: gif.mime_type || 'video/mp4',
+    });
+
+    if (isVideoGif(gif)) {
+      return (
+        <video
+          src={mediaUrl}
+          poster={gif.thumb_base64}
+          autoPlay
+          loop
+          muted
+          playsInline
+          className="h-full w-full object-contain rounded bg-black/5"
+          onError={() => setFailedPrimary(true)}
+        />
+      );
+    }
+
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={mediaUrl}
+        alt=""
+        className="h-full w-full object-contain rounded"
+        onError={() => setFailedPrimary(true)}
+      />
+    );
+  }
+
+  if (!failedPrimary && gif.thumb_url) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={proxiedRemoteUrl(gif.thumb_url)}
+        alt=""
+        className="h-full w-full object-contain rounded"
+        onError={() => setFailedPrimary(true)}
+      />
+    );
+  }
+
+  if (gif.thumb_base64) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img src={gif.thumb_base64} alt="" className="h-full w-full object-contain rounded" />
+    );
+  }
+
+  return <span className="text-xs text-gray-400">GIF</span>;
+}
 
 type TelegramInsertPickerProps = {
   open: boolean;
@@ -393,15 +476,7 @@ export default function TelegramInsertPicker({ open, onClose, anchorRef }: Teleg
                       onClick={() => pickGif(gif)}
                       className="aspect-square p-1 hover:bg-gray-100 rounded disabled:opacity-40 overflow-hidden"
                     >
-                      {gif.thumb_base64 ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={gif.thumb_base64} alt="" className="h-full w-full object-cover rounded" />
-                      ) : gif.thumb_url ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={gif.thumb_url} alt="" className="h-full w-full object-cover rounded" />
-                      ) : (
-                        <span className="text-xs text-gray-400">GIF</span>
-                      )}
+                      <GifPickerThumb gif={gif} />
                     </button>
                   ))}
                 </div>

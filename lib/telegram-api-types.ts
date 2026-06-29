@@ -57,11 +57,21 @@ export type TelegramGif = {
   id: string;
   access_hash?: string;
   file_reference?: string;
+  dc_id?: string;
   alt: string;
   mime_type?: string;
   thumb_base64?: string;
   query_id?: string;
   thumb_url?: string;
+};
+
+export type TelegramPhoto = {
+  id: string;
+  access_hash: string;
+  file_reference: string;
+  dc_id?: string;
+  mime_type?: string;
+  thumb_base64?: string;
 };
 
 export type TelegramCustomEmoji = {
@@ -83,9 +93,10 @@ export type TelegramMessage = {
   reply_to?: number;
   edit_date?: number;
   is_edited: boolean;
-  media_type?: 'sticker' | 'gif' | 'custom_emoji_text';
+  media_type?: 'sticker' | 'gif' | 'photo' | 'custom_emoji_text';
   sticker?: TelegramSticker;
   gif?: TelegramGif;
+  photo?: TelegramPhoto;
   custom_emojis?: TelegramCustomEmoji[];
 };
 
