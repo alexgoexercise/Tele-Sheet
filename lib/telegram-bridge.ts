@@ -4,9 +4,12 @@ import path from 'node:path';
 import { URL } from 'node:url';
 import bigInt from 'big-integer';
 import { Api, TelegramClient, events, sessions } from 'teleproto';
+import { returnBigInt } from 'teleproto/Helpers';
 import type { Dialog } from 'teleproto/tl/custom/dialog.js';
 import { getDisplayName, getPeerId } from 'teleproto/Utils';
 import { WebSocket, WebSocketServer } from 'ws';
+
+const LONG_ZERO = returnBigInt(0);
 
 const { StringSession } = sessions;
 const { NewMessage, EditedMessage, DeletedMessage, MessageRead } = events;
@@ -1267,7 +1270,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
     case 'getFavedStickers': {
       const tg = await requireAuth(ws);
       if (!tg) return;
-      const result = await tg.invoke(new Api.messages.GetFavedStickers({ hash: bigInt(0) }));
+      const result = await tg.invoke(new Api.messages.GetFavedStickers({ hash: LONG_ZERO }));
       if (result instanceof Api.messages.FavedStickersNotModified) {
         sendToClient(ws, { '@type': 'updateFavedStickers', stickers: cachedFavedStickers });
         return;
@@ -1288,7 +1291,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
     case 'getAllStickerSets': {
       const tg = await requireAuth(ws);
       if (!tg) return;
-      const result = await tg.invoke(new Api.messages.GetAllStickers({ hash: bigInt(0) }));
+      const result = await tg.invoke(new Api.messages.GetAllStickers({ hash: LONG_ZERO }));
       if (result instanceof Api.messages.AllStickersNotModified) {
         sendToClient(ws, { '@type': 'updateStickerSets', sets: cachedStickerSets });
         return;
@@ -1335,7 +1338,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
       const tg = await requireAuth(ws);
       if (!tg) return;
       const result = await tg.invoke(
-        new Api.messages.SearchStickerSets({ q: cmd.search ?? '', hash: bigInt(0) }),
+        new Api.messages.SearchStickerSets({ q: cmd.search ?? '', hash: LONG_ZERO }),
       );
       if (result instanceof Api.messages.FoundStickerSetsNotModified) {
         sendToClient(ws, { '@type': 'updateStickerSetSearch', sets: [] });
@@ -1358,7 +1361,7 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
     case 'getSavedGifs': {
       const tg = await requireAuth(ws);
       if (!tg) return;
-      const result = await tg.invoke(new Api.messages.GetSavedGifs({ hash: bigInt(0) }));
+      const result = await tg.invoke(new Api.messages.GetSavedGifs({ hash: LONG_ZERO }));
       if (result instanceof Api.messages.SavedGifsNotModified) {
         sendToClient(ws, { '@type': 'updateSavedGifs', gifs: cachedSavedGifs });
         return;
