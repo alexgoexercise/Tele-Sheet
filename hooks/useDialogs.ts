@@ -11,28 +11,34 @@ import {
 import { useTelegramAuthContext } from '../components/TelegramAuthProvider';
 
 export function useDialogs() {
-  const { step, subscribeUpdates, sendCommand } = useTelegramAuthContext();
+  const { step, isSigningOut, subscribeUpdates, sendCommand } = useTelegramAuthContext();
   const [dialogs, setDialogs] = useState<TelegramDialog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const fetchDialogs = useCallback(
     (showLoading = false) => {
+      if (isSigningOut || step !== 'ready') return;
       if (showLoading) {
         setLoading(true);
         setError(null);
       }
       sendCommand({ method: 'getDialogs', limit: 50, archived: false });
     },
-    [sendCommand],
+    [isSigningOut, step, sendCommand],
   );
 
   const refresh = useCallback(() => fetchDialogs(true), [fetchDialogs]);
 
   useEffect(() => {
-    if (step !== 'ready') return;
+    if (isSigningOut || step !== 'ready') {
+      setDialogs([]);
+      setLoading(false);
+      setError(null);
+      return;
+    }
     fetchDialogs(true);
-  }, [step, fetchDialogs]);
+  }, [step, isSigningOut, fetchDialogs]);
 
   useEffect(() => {
     return subscribeUpdates((update: WsUpdate) => {
@@ -71,11 +77,12 @@ export function useDialogs() {
       }
 
       if (update['@type'] === 'error') {
+        if (isSigningOut || step !== 'ready') return;
         setError(update.message);
         setLoading(false);
       }
     });
-  }, [subscribeUpdates, fetchDialogs]);
+  }, [subscribeUpdates, fetchDialogs, isSigningOut, step]);
 
   return { dialogs, loading, error, refresh };
 }

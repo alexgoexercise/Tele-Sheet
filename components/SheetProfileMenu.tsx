@@ -78,8 +78,7 @@ export default function SheetProfileMenu({ interactive = true }: SheetProfileMen
 
   const handleSignOut = () => {
     close();
-    logout();
-    router.replace('/login');
+    logout({ onNavigate: () => router.replace('/login') });
   };
 
   if (!interactive) {

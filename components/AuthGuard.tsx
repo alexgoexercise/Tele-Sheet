@@ -7,14 +7,14 @@ import { useTelegramAuthContext } from './TelegramAuthProvider';
 
 export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
-  const { step, connected } = useTelegramAuthContext();
+  const { step, connected, isSigningOut } = useTelegramAuthContext();
 
   useEffect(() => {
     if (step === 'connecting' || !connected) return;
-    if (step !== 'ready') {
+    if (isSigningOut || step !== 'ready') {
       router.replace('/login');
     }
-  }, [step, connected, router]);
+  }, [step, connected, isSigningOut, router]);
 
   if (step === 'connecting' || !connected) {
     return (
@@ -35,7 +35,7 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
     );
   }
 
-  if (step !== 'ready') {
+  if (isSigningOut || step !== 'ready') {
     return null;
   }
 

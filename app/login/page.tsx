@@ -39,6 +39,7 @@ export default function LoginPage() {
     step,
     connected,
     error,
+    isSigningOut,
     submitting,
     qrUrl,
     passwordHint,
@@ -65,10 +66,9 @@ export default function LoginPage() {
   }, [step]);
 
   useEffect(() => {
-    if (step === 'ready') {
-      router.replace('/chats');
-    }
-  }, [step, router]);
+    if (isSigningOut || step !== 'ready') return;
+    router.replace('/chats');
+  }, [step, isSigningOut, router]);
 
   useEffect(() => {
     if (connected && mode === 'qr' && step === 'qr' && !qrUrl && !submitting) {

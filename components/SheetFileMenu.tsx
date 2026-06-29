@@ -45,8 +45,7 @@ export default function SheetFileMenu() {
   const handleDisconnect = () => {
     setOpen(false);
     setPosition(null);
-    logout();
-    router.replace('/login');
+    logout({ onNavigate: () => router.replace('/login') });
   };
 
   return (

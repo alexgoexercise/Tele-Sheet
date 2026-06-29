@@ -58,6 +58,13 @@ export function useTelegramAuth() {
   const retriesRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const updateListenersRef = useRef<Set<(update: WsUpdate) => void>>(new Set());
+  const signingOutRef = useRef(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
+
+  const clearSigningOut = useCallback(() => {
+    signingOutRef.current = false;
+    setIsSigningOut(false);
+  }, []);
 
   const send = useCallback((payload: object) => {
     const ws = wsRef.current;
@@ -105,6 +112,7 @@ export function useTelegramAuth() {
     }
 
     if (update['@type'] === 'updateLoggedOut') {
+      clearSigningOut();
       setUser(null);
       setQrUrl(null);
       setStep('qr');
@@ -115,7 +123,7 @@ export function useTelegramAuth() {
       setError(update.message ?? 'Something went wrong');
       setSubmitting(false);
     }
-  }, []);
+  }, [clearSigningOut]);
 
   const connectWs = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -165,6 +173,12 @@ export function useTelegramAuth() {
       wsRef.current = null;
     };
   }, [connectWs]);
+
+  useEffect(() => {
+    if (isSigningOut && step !== 'ready' && step !== 'connecting') {
+      clearSigningOut();
+    }
+  }, [isSigningOut, step, clearSigningOut]);
 
   const startQrAuth = useCallback(() => {
     setError(null);
@@ -216,13 +230,20 @@ export function useTelegramAuth() {
     [send],
   );
 
-  const logout = useCallback(() => {
-    setUser(null);
-    setQrUrl(null);
-    setStep('qr');
-    setSubmitting(false);
-    send({ method: 'logOut' });
-  }, [send]);
+  const logout = useCallback(
+    (options?: { onNavigate?: () => void }) => {
+      signingOutRef.current = true;
+      setIsSigningOut(true);
+      setUser(null);
+      setQrUrl(null);
+      setStep('qr');
+      setSubmitting(false);
+      setError(null);
+      send({ method: 'logOut' });
+      options?.onNavigate?.();
+    },
+    [send],
+  );
 
   const sendCommand = useCallback(
     (cmd: WsCommand) => send(cmd),
@@ -241,6 +262,7 @@ export function useTelegramAuth() {
     connected,
     error,
     user,
+    isSigningOut,
     submitting,
     qrUrl,
     passwordHint,
