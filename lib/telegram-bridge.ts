@@ -1,6 +1,8 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { URL } from 'node:url';
+import bigInt from 'big-integer';
 import { Api, TelegramClient, events, sessions } from 'teleproto';
 import type { Dialog } from 'teleproto/tl/custom/dialog.js';
 import { getDisplayName, getPeerId } from 'teleproto/Utils';
@@ -26,13 +28,48 @@ type WsCommand = {
   search?: string;
   revoke?: boolean;
   archived?: boolean;
+  sticker?: {
+    id: string;
+    access_hash: string;
+    file_reference: string;
+  };
+  short_name?: string;
+  offset?: string;
+  gif?: {
+    query_id?: string;
+    result_id?: string;
+    id?: string;
+    access_hash?: string;
+    file_reference?: string;
+  };
 };
 
 type BridgeGlobal = typeof globalThis & {
   __teleSheetBridgeStarted?: boolean;
+  __teleSheetHandleWsCommand?: (raw: string, ws: WebSocket) => Promise<void>;
+  __teleSheetClient?: TelegramClient;
+  __teleSheetClientReady?: boolean;
 };
 
 const bridgeGlobal = globalThis as BridgeGlobal;
+
+function bridgeClient(): TelegramClient | undefined {
+  return bridgeGlobal.__teleSheetClient ?? client;
+}
+
+function setBridgeClient(tg: TelegramClient | undefined) {
+  client = tg;
+  bridgeGlobal.__teleSheetClient = tg;
+}
+
+function isBridgeClientReady(): boolean {
+  return bridgeGlobal.__teleSheetClientReady ?? clientReady;
+}
+
+function setBridgeClientReady(ready: boolean) {
+  clientReady = ready;
+  bridgeGlobal.__teleSheetClientReady = ready;
+}
 
 const apiId = Number(process.env.TELEGRAM_API_ID);
 const apiHash = process.env.TELEGRAM_API_HASH ?? '';
@@ -42,7 +79,7 @@ const sessionPath = path.join(dataDir, 'session.txt');
 
 const wsClients = new Set<WebSocket>();
 
-let client: TelegramClient | undefined;
+let client: TelegramClient | undefined = bridgeGlobal.__teleSheetClient;
 let eventHandlersRegistered = false;
 let authInProgress = false;
 
@@ -52,11 +89,23 @@ let passwordResolve: ((value: string) => void) | null = null;
 
 let pendingPhone: string | null = null;
 let currentAuthState = 'authorizationStateWaitQrCode';
-let clientReady = false;
+let clientReady = bridgeGlobal.__teleSheetClientReady ?? false;
 let qrAbortController: AbortController | null = null;
 let qrPasswordResolve: ((value: string) => void) | null = null;
 let lastQrUpdate: TdUpdate | null = null;
 let selfUserId: string | undefined;
+let cachedFavedStickers: Array<ReturnType<typeof serializeDocument> & { thumb_base64?: string }> = [];
+let cachedStickerSets: Array<ReturnType<typeof serializeStickerSet>> = [];
+let cachedSavedGifs: Array<{
+  id: string;
+  access_hash?: string;
+  file_reference?: string;
+  alt: string;
+  mime_type?: string;
+  thumb_base64?: string;
+  query_id?: string;
+  thumb_url?: string;
+}> = [];
 
 const SAVED_MESSAGES_TITLE = 'Saved Messages';
 
@@ -94,15 +143,25 @@ function authState(type: string, extra: Record<string, unknown> = {}) {
 }
 
 async function getAuthSnapshot(): Promise<TdUpdate> {
-  if (clientReady && client?.connected && (await client.isUserAuthorized())) {
+  const tg = bridgeClient();
+  if (isBridgeClientReady() && tg?.connected && (await tg.isUserAuthorized())) {
     return {
       '@type': 'updateAuthorizationState',
       authorization_state: { '@type': 'authorizationStateReady' },
     };
   }
+
+  const waitState =
+    authInProgress && currentAuthState !== 'authorizationStateReady'
+      ? currentAuthState
+      : 'authorizationStateWaitQrCode';
+  if (currentAuthState === 'authorizationStateReady') {
+    currentAuthState = waitState;
+  }
+
   return {
     '@type': 'updateAuthorizationState',
-    authorization_state: { '@type': currentAuthState },
+    authorization_state: { '@type': waitState },
   };
 }
 
@@ -121,8 +180,9 @@ function loadSession(): string {
 }
 
 function saveSession() {
-  if (!client) return;
-  const session = client.session.save() as unknown as string;
+  const tg = bridgeClient();
+  if (!tg) return;
+  const session = tg.session.save() as unknown as string;
   fs.writeFileSync(sessionPath, session, 'utf8');
 }
 
@@ -138,7 +198,7 @@ async function ensureClientBootstrapped(): Promise<boolean> {
     broadcast({ '@type': 'error', message: CREDENTIALS_ERROR });
     return false;
   }
-  if (!client) {
+  if (!bridgeClient()) {
     try {
       await bootstrapClient();
     } catch (err) {
@@ -189,7 +249,130 @@ type MessageLike = {
   fromId?: Api.TypePeer;
   sender?: object;
   _sender?: object;
+  entities?: Api.TypeMessageEntity[];
+  sticker?: Api.Document;
+  media?: Api.TypeMessageMedia;
 };
+
+function serializeDocument(doc: Api.Document) {
+  const stickerAttr = doc.attributes?.find(
+    (a): a is Api.DocumentAttributeSticker => a instanceof Api.DocumentAttributeSticker,
+  );
+  const customEmojiAttr = doc.attributes?.find(
+    (a): a is Api.DocumentAttributeCustomEmoji => a instanceof Api.DocumentAttributeCustomEmoji,
+  );
+  const videoAttr = doc.attributes?.find(
+    (a): a is Api.DocumentAttributeVideo => a instanceof Api.DocumentAttributeVideo,
+  );
+  return {
+    id: doc.id?.toString() ?? '',
+    access_hash: doc.accessHash?.toString() ?? '',
+    file_reference: Buffer.from(doc.fileReference ?? []).toString('base64'),
+    alt: stickerAttr?.alt ?? customEmojiAttr?.alt ?? (videoAttr?.roundMessage ? 'GIF' : ''),
+    mime_type: doc.mimeType,
+    is_animated: doc.attributes?.some((a) => a instanceof Api.DocumentAttributeAnimated),
+    is_video: doc.mimeType === 'video/webm',
+  };
+}
+
+function serializeStickerSet(set: Api.StickerSet) {
+  return {
+    id: set.id?.toString() ?? '',
+    access_hash: set.accessHash?.toString() ?? '',
+    title: set.title ?? '',
+    short_name: set.shortName ?? '',
+    count: set.count ?? 0,
+  };
+}
+
+async function serializeStickerSetWithThumb(tg: TelegramClient, set: Api.StickerSet) {
+  const base = serializeStickerSet(set);
+  if (set.thumbs?.length) {
+    try {
+      const media = new Api.MessageMediaDocument({
+        document: new Api.Document({
+          id: set.thumbDocumentId ?? bigInt(0),
+          accessHash: set.accessHash,
+          fileReference: Buffer.alloc(0),
+          date: 0,
+          mimeType: 'image/webp',
+          size: bigInt(0),
+          dcId: set.thumbDcId ?? 1,
+          attributes: [],
+        }),
+      });
+      const buffer = await tg.downloadMedia(media, { thumb: 0 });
+      if (buffer) {
+        const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as string);
+        return { ...base, thumb_base64: `data:image/webp;base64,${bytes.toString('base64')}` };
+      }
+    } catch {
+      // thumb optional
+    }
+  }
+  return base;
+}
+
+async function downloadDocumentThumb(tg: TelegramClient, doc: Api.Document) {
+  try {
+    const media = new Api.MessageMediaDocument({ document: doc });
+    const buffer = await tg.downloadMedia(media, { thumb: 0 });
+    if (!buffer) return undefined;
+    const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as string);
+    return `data:image/webp;base64,${bytes.toString('base64')}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function getGifDocument(message: MessageLike): Api.Document | undefined {
+  const media = message.media;
+  if (media instanceof Api.MessageMediaDocument && media.document instanceof Api.Document) {
+    const doc = media.document;
+    const isSticker = doc.attributes?.some((a) => a instanceof Api.DocumentAttributeSticker);
+    const isGif =
+      doc.attributes?.some((a) => a instanceof Api.DocumentAttributeAnimated) ||
+      (doc.mimeType === 'video/mp4' &&
+        doc.attributes?.some((a) => a instanceof Api.DocumentAttributeVideo));
+    if (!isSticker && isGif) return doc;
+  }
+  return undefined;
+}
+
+async function resolveGifSearchBot(tg: TelegramClient) {
+  try {
+    const config = await tg.invoke(new Api.help.GetConfig());
+    const username = config.gifSearchUsername;
+    if (username) return tg.getEntity(username);
+  } catch {
+    // fall through
+  }
+  return tg.getEntity('gif');
+}
+
+function webDocumentUrl(doc: Api.TypeWebDocument | undefined) {
+  return doc instanceof Api.WebDocument ? doc.url : undefined;
+}
+
+function getStickerDocument(message: MessageLike): Api.Document | undefined {
+  if (message.sticker) return message.sticker;
+  const media = message.media;
+  if (media instanceof Api.MessageMediaDocument && media.document instanceof Api.Document) {
+    const doc = media.document;
+    if (doc.attributes?.some((a) => a instanceof Api.DocumentAttributeSticker)) {
+      return doc;
+    }
+  }
+  return undefined;
+}
+
+function inputDocumentFromRef(ref: { id: string; access_hash: string; file_reference: string }) {
+  return new Api.InputDocument({
+    id: bigInt(ref.id),
+    accessHash: bigInt(ref.access_hash),
+    fileReference: Buffer.from(ref.file_reference, 'base64'),
+  });
+}
 
 async function serializeMessage(message: MessageLike, tg?: TelegramClient) {
   const chatId =
@@ -225,7 +408,17 @@ async function serializeMessage(message: MessageLike, tg?: TelegramClient) {
     }
   }
 
-  return {
+  const stickerDoc = getStickerDocument(message);
+  const customEmojis =
+    message.entities
+      ?.filter((e): e is Api.MessageEntityCustomEmoji => e instanceof Api.MessageEntityCustomEmoji)
+      .map((e) => ({
+        document_id: e.documentId.toString(),
+        offset: e.offset,
+        length: e.length,
+      })) ?? [];
+
+  const base = {
     id: message.id,
     chat_id: chatId,
     date: message.date,
@@ -238,6 +431,49 @@ async function serializeMessage(message: MessageLike, tg?: TelegramClient) {
     edit_date: message.editDate,
     is_edited: Boolean(message.editDate),
   };
+
+  if (stickerDoc) {
+    const stickerAttr = stickerDoc.attributes?.find(
+      (a): a is Api.DocumentAttributeSticker => a instanceof Api.DocumentAttributeSticker,
+    );
+    const sticker = serializeDocument(stickerDoc);
+    const thumb_base64 = tg ? await downloadDocumentThumb(tg, stickerDoc) : undefined;
+    return {
+      ...base,
+      text: base.text || stickerAttr?.alt || '',
+      media_type: 'sticker' as const,
+      sticker: { ...sticker, thumb_base64 },
+    };
+  }
+
+  const gifDoc = getGifDocument(message);
+  if (gifDoc) {
+    const gif = serializeDocument(gifDoc);
+    const thumb_base64 = tg ? await downloadDocumentThumb(tg, gifDoc) : undefined;
+    return {
+      ...base,
+      text: base.text || gif.alt || 'GIF',
+      media_type: 'gif' as const,
+      gif: {
+        id: gif.id,
+        access_hash: gif.access_hash,
+        file_reference: gif.file_reference,
+        alt: gif.alt || 'GIF',
+        mime_type: gif.mime_type,
+        thumb_base64,
+      },
+    };
+  }
+
+  if (customEmojis.length > 0) {
+    return {
+      ...base,
+      media_type: 'custom_emoji_text' as const,
+      custom_emojis: customEmojis,
+    };
+  }
+
+  return base;
 }
 
 async function serializeMessages(messages: object[], tg: TelegramClient) {
@@ -276,15 +512,23 @@ function chatIdFromEntity(entity: object): string {
 }
 
 async function requireAuth(ws: WebSocket): Promise<TelegramClient | null> {
-  if (!client) {
+  const tg = bridgeClient();
+  if (!tg) {
     sendToClient(ws, { '@type': 'error', message: CREDENTIALS_ERROR });
     return null;
   }
-  if (!(await client.isUserAuthorized())) {
+  if (!(await tg.isUserAuthorized())) {
+    if (currentAuthState === 'authorizationStateReady') {
+      currentAuthState = 'authorizationStateWaitQrCode';
+    }
+    sendToClient(ws, {
+      '@type': 'updateAuthorizationState',
+      authorization_state: { '@type': 'authorizationStateWaitQrCode' },
+    });
     sendToClient(ws, { '@type': 'error', message: 'not authorized' });
     return null;
   }
-  return client;
+  return tg;
 }
 
 async function resolveChat(chatId: string | number) {
@@ -292,29 +536,32 @@ async function resolveChat(chatId: string | number) {
 }
 
 function registerEventHandlers() {
-  if (eventHandlersRegistered || !client) return;
+  const tg = bridgeClient();
+  if (eventHandlersRegistered || !tg) return;
   eventHandlersRegistered = true;
 
-  client.addEventHandler(async (event) => {
+  tg.addEventHandler(async (event) => {
     const message = event.message;
-    if (!message || !client) return;
-    const serialized = await serializeMessage(message as MessageLike, client);
+    const active = bridgeClient();
+    if (!message || !active) return;
+    const serialized = await serializeMessage(message as MessageLike, active);
     broadcast({
       '@type': 'updateNewMessage',
       message: serialized,
     });
   }, new NewMessage({}));
 
-  client.addEventHandler(async (event) => {
+  tg.addEventHandler(async (event) => {
     const message = event.message;
-    if (!message || !client) return;
+    const active = bridgeClient();
+    if (!message || !active) return;
     broadcast({
       '@type': 'updateMessageEdited',
-      message: await serializeMessage(message as MessageLike, client),
+      message: await serializeMessage(message as MessageLike, active),
     });
   }, new EditedMessage({}));
 
-  client.addEventHandler(async (event) => {
+  tg.addEventHandler(async (event) => {
     const chatId =
       event.peer != null
         ? String(event.peer)
@@ -328,7 +575,7 @@ function registerEventHandlers() {
     });
   }, new DeletedMessage({}));
 
-  client.addEventHandler(async (event) => {
+  tg.addEventHandler(async (event) => {
     const chatId =
       'channelId' in event.originalUpdate
         ? String(event.originalUpdate.channelId)
@@ -345,10 +592,11 @@ function registerEventHandlers() {
 }
 
 function getClient(): TelegramClient {
-  if (!client) {
+  const tg = bridgeClient();
+  if (!tg) {
     throw new Error(CREDENTIALS_ERROR);
   }
-  return client;
+  return tg;
 }
 
 async function ensureConnected() {
@@ -492,14 +740,15 @@ async function handleLogout() {
   authInProgress = false;
   eventHandlersRegistered = false;
 
-  if (client) {
+  if (bridgeClient()) {
+    const tg = bridgeClient()!;
     try {
-      await client.logOut();
+      await tg.logOut();
     } catch (err) {
       console.warn('logOut error:', err);
     }
     try {
-      await client.disconnect();
+      await tg.disconnect();
     } catch {
       // ignore disconnect errors during logout
     }
@@ -512,12 +761,14 @@ async function handleLogout() {
   }
 
   clientReady = false;
-  client = new TelegramClient(new StringSession(''), apiId, apiHash, {
-    connectionRetries: 5,
-  });
+  setBridgeClient(
+    new TelegramClient(new StringSession(''), apiId, apiHash, {
+      connectionRetries: 5,
+    }),
+  );
 
   await ensureConnected();
-  clientReady = true;
+  setBridgeClientReady(true);
 
   lastQrUpdate = null;
   selfUserId = undefined;
@@ -527,13 +778,15 @@ async function handleLogout() {
 
 async function bootstrapClient() {
   const session = new StringSession(loadSession());
-  client = new TelegramClient(session, apiId, apiHash, {
-    connectionRetries: 5,
-  });
+  setBridgeClient(
+    new TelegramClient(session, apiId, apiHash, {
+      connectionRetries: 5,
+    }),
+  );
 
   await ensureConnected();
 
-  clientReady = true;
+  setBridgeClientReady(true);
   const tg = getClient();
 
   if (await tg.isUserAuthorized()) {
@@ -798,12 +1051,323 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
       return;
     }
 
+    case 'getFavedStickers': {
+      const tg = await requireAuth(ws);
+      if (!tg) return;
+      const result = await tg.invoke(new Api.messages.GetFavedStickers({ hash: bigInt(0) }));
+      if (result instanceof Api.messages.FavedStickersNotModified) {
+        sendToClient(ws, { '@type': 'updateFavedStickers', stickers: cachedFavedStickers });
+        return;
+      }
+      const stickers = await Promise.all(
+        result.stickers
+          .filter((doc): doc is Api.Document => doc instanceof Api.Document)
+          .map(async (doc) => ({
+            ...serializeDocument(doc),
+            thumb_base64: await downloadDocumentThumb(tg, doc),
+          })),
+      );
+      cachedFavedStickers = stickers;
+      sendToClient(ws, { '@type': 'updateFavedStickers', stickers });
+      return;
+    }
+
+    case 'getAllStickerSets': {
+      const tg = await requireAuth(ws);
+      if (!tg) return;
+      const result = await tg.invoke(new Api.messages.GetAllStickers({ hash: bigInt(0) }));
+      if (result instanceof Api.messages.AllStickersNotModified) {
+        sendToClient(ws, { '@type': 'updateStickerSets', sets: cachedStickerSets });
+        return;
+      }
+      const sets = result.sets
+        .filter((s): s is Api.StickerSet => s instanceof Api.StickerSet)
+        .map(serializeStickerSet);
+      cachedStickerSets = sets;
+      sendToClient(ws, { '@type': 'updateStickerSets', sets });
+      return;
+    }
+
+    case 'getStickerSet': {
+      const tg = await requireAuth(ws);
+      if (!tg) return;
+      if (!cmd.short_name) {
+        sendToClient(ws, { '@type': 'error', message: 'getStickerSet requires short_name' });
+        return;
+      }
+      const result = await tg.invoke(
+        new Api.messages.GetStickerSet({
+          stickerset: new Api.InputStickerSetShortName({ shortName: cmd.short_name }),
+          hash: 0,
+        }),
+      );
+      if (!(result instanceof Api.messages.StickerSet)) return;
+      const stickers = await Promise.all(
+        result.documents
+          .filter((doc): doc is Api.Document => doc instanceof Api.Document)
+          .map(async (doc) => ({
+            ...serializeDocument(doc),
+            thumb_base64: await downloadDocumentThumb(tg, doc),
+          })),
+      );
+      sendToClient(ws, {
+        '@type': 'updateStickerSetStickers',
+        set: serializeStickerSet(result.set),
+        stickers,
+      });
+      return;
+    }
+
+    case 'searchStickerSets': {
+      const tg = await requireAuth(ws);
+      if (!tg) return;
+      const result = await tg.invoke(
+        new Api.messages.SearchStickerSets({ q: cmd.search ?? '', hash: bigInt(0) }),
+      );
+      if (result instanceof Api.messages.FoundStickerSetsNotModified) {
+        sendToClient(ws, { '@type': 'updateStickerSetSearch', sets: [] });
+        return;
+      }
+      if (result instanceof Api.messages.FoundStickerSets) {
+        const sets = result.sets
+          .map((covered) => {
+            if ('set' in covered && covered.set instanceof Api.StickerSet) {
+              return serializeStickerSet(covered.set);
+            }
+            return null;
+          })
+          .filter((s): s is ReturnType<typeof serializeStickerSet> => s != null);
+        sendToClient(ws, { '@type': 'updateStickerSetSearch', sets });
+      }
+      return;
+    }
+
+    case 'getSavedGifs': {
+      const tg = await requireAuth(ws);
+      if (!tg) return;
+      const result = await tg.invoke(new Api.messages.GetSavedGifs({ hash: bigInt(0) }));
+      if (result instanceof Api.messages.SavedGifsNotModified) {
+        sendToClient(ws, { '@type': 'updateSavedGifs', gifs: cachedSavedGifs });
+        return;
+      }
+      if (result instanceof Api.messages.SavedGifs) {
+        const gifs = await Promise.all(
+          result.gifs
+            .filter((doc): doc is Api.Document => doc instanceof Api.Document)
+            .map(async (doc) => {
+              const serialized = serializeDocument(doc);
+              return {
+                id: serialized.id,
+                access_hash: serialized.access_hash,
+                file_reference: serialized.file_reference,
+                alt: serialized.alt || 'GIF',
+                mime_type: serialized.mime_type,
+                thumb_base64: await downloadDocumentThumb(tg, doc),
+              };
+            }),
+        );
+        cachedSavedGifs = gifs;
+        sendToClient(ws, { '@type': 'updateSavedGifs', gifs });
+      }
+      return;
+    }
+
+    case 'searchGifs': {
+      const tg = await requireAuth(ws);
+      if (!tg) return;
+      const offset = cmd.offset ?? '';
+      try {
+        const me = await tg.getMe();
+        const bot = await resolveGifSearchBot(tg);
+        const result = await tg.invoke(
+          new Api.messages.GetInlineBotResults({
+            bot,
+            peer: me,
+            query: cmd.search ?? '',
+            offset,
+          }),
+        );
+        if (!(result instanceof Api.messages.BotResults)) {
+          sendToClient(ws, { '@type': 'updateGifSearch', gifs: [], next_offset: undefined });
+          return;
+        }
+        const gifs = await Promise.all(
+          result.results
+            .filter(
+              (r): r is Api.BotInlineResult | Api.BotInlineMediaResult =>
+                r instanceof Api.BotInlineResult || r instanceof Api.BotInlineMediaResult,
+            )
+            .map(async (r) => {
+              if (r instanceof Api.BotInlineMediaResult && r.document instanceof Api.Document) {
+                const serialized = serializeDocument(r.document);
+                return {
+                  id: r.id,
+                  alt: serialized.alt || 'GIF',
+                  access_hash: serialized.access_hash,
+                  file_reference: serialized.file_reference,
+                  mime_type: serialized.mime_type,
+                  query_id: result.queryId?.toString(),
+                  thumb_base64: await downloadDocumentThumb(tg, r.document),
+                };
+              }
+              if (r instanceof Api.BotInlineResult) {
+                return {
+                  id: r.id,
+                  alt: 'GIF',
+                  query_id: result.queryId?.toString(),
+                  thumb_url: webDocumentUrl(r.thumb) ?? webDocumentUrl(r.content),
+                };
+              }
+              return {
+                id: r.id,
+                alt: 'GIF',
+                query_id: result.queryId?.toString(),
+              };
+            }),
+        );
+        sendToClient(ws, {
+          '@type': 'updateGifSearch',
+          gifs,
+          next_offset: result.nextOffset || undefined,
+        });
+      } catch (err) {
+        sendToClient(ws, { '@type': 'updateGifSearch', gifs: [], next_offset: undefined });
+        sendToClient(ws, { '@type': 'error', message: String(err) });
+      }
+      return;
+    }
+
+    case 'sendSticker': {
+      const tg = await requireAuth(ws);
+      if (!tg) return;
+      if (!cmd.sticker?.id || !cmd.sticker.access_hash || !cmd.sticker.file_reference) {
+        sendToClient(ws, { '@type': 'error', message: 'sendSticker requires sticker id, access_hash, file_reference' });
+        return;
+      }
+      if (cmd.chat_id === undefined || cmd.chat_id === '') {
+        sendToClient(ws, { '@type': 'error', message: 'sendSticker requires chat_id' });
+        return;
+      }
+      const entity = await resolveChat(cmd.chat_id);
+      const chatId = chatIdFromEntity(entity);
+      const sent = await tg.sendFile(entity, {
+        file: new Api.InputMediaDocument({ id: inputDocumentFromRef(cmd.sticker) }),
+        replyTo: cmd.reply_to,
+      });
+      sendToClient(ws, {
+        '@type': 'updateMessageSendSucceeded',
+        chat_id: chatId,
+        message: await serializeMessage(sent as MessageLike, tg),
+      });
+      return;
+    }
+
+    case 'sendGif': {
+      const tg = await requireAuth(ws);
+      if (!tg) return;
+      if (cmd.chat_id === undefined || cmd.chat_id === '') {
+        sendToClient(ws, { '@type': 'error', message: 'sendGif requires chat_id' });
+        return;
+      }
+      const entity = await resolveChat(cmd.chat_id);
+      const chatId = chatIdFromEntity(entity);
+      let sent: MessageLike | undefined;
+      if (cmd.gif?.query_id && cmd.gif?.result_id) {
+        const updates = await tg.invoke(
+          new Api.messages.SendInlineBotResult({
+            peer: entity,
+            queryId: bigInt(cmd.gif.query_id),
+            id: cmd.gif.result_id,
+          }),
+        );
+        if (updates instanceof Api.Updates || updates instanceof Api.UpdatesCombined) {
+          for (const u of updates.updates) {
+            if (u instanceof Api.UpdateNewMessage && u.message) {
+              sent = u.message as MessageLike;
+              break;
+            }
+            if (u instanceof Api.UpdateNewChannelMessage && u.message) {
+              sent = u.message as MessageLike;
+              break;
+            }
+          }
+        }
+      } else if (cmd.gif?.id && cmd.gif.access_hash && cmd.gif.file_reference) {
+        sent = await tg.sendFile(entity, {
+          file: new Api.InputMediaDocument({
+            id: inputDocumentFromRef({
+              id: cmd.gif.id,
+              access_hash: cmd.gif.access_hash,
+              file_reference: cmd.gif.file_reference,
+            }),
+          }),
+          replyTo: cmd.reply_to,
+        });
+      } else {
+        sendToClient(ws, { '@type': 'error', message: 'sendGif requires gif document or inline result' });
+        return;
+      }
+      if (!sent) {
+        sendToClient(ws, { '@type': 'error', message: 'Failed to send GIF' });
+        return;
+      }
+      sendToClient(ws, {
+        '@type': 'updateMessageSendSucceeded',
+        chat_id: chatId,
+        message: await serializeMessage(sent as MessageLike, tg),
+      });
+      return;
+    }
+
     default:
       console.warn('unknown ws method:', cmd.method);
       sendToClient(ws, { '@type': 'error', message: `unknown method: ${cmd.method}` });
   }
   } catch (err) {
     sendToClient(ws, { '@type': 'error', message: String(err) });
+  }
+}
+
+async function handleStickerPreview(req: http.IncomingMessage, res: http.ServerResponse) {
+  try {
+    const tg = bridgeClient();
+    if (!tg || !(await tg.isUserAuthorized())) {
+      res.writeHead(401);
+      res.end('unauthorized');
+      return;
+    }
+    const url = new URL(req.url ?? '', 'http://127.0.0.1');
+    const id = url.searchParams.get('id');
+    const accessHash = url.searchParams.get('access_hash');
+    const fileReference = url.searchParams.get('file_reference');
+    if (!id || !accessHash || !fileReference) {
+      res.writeHead(400);
+      res.end('missing params');
+      return;
+    }
+    const doc = new Api.Document({
+      id: bigInt(id),
+      accessHash: bigInt(accessHash),
+      fileReference: Buffer.from(fileReference, 'base64'),
+      date: 0,
+      mimeType: 'image/webp',
+      size: bigInt(0),
+      dcId: 0,
+      attributes: [],
+    });
+    const media = new Api.MessageMediaDocument({ document: doc });
+    const buffer = await tg.downloadMedia(media, { thumb: 0 });
+    if (!buffer) {
+      res.writeHead(404);
+      res.end('not found');
+      return;
+    }
+    const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as string);
+    res.writeHead(200, { 'Content-Type': 'image/webp', 'Cache-Control': 'private, max-age=3600' });
+    res.end(bytes);
+  } catch {
+    res.writeHead(500);
+    res.end('error');
   }
 }
 
@@ -825,6 +1389,11 @@ function startHttpServer() {
       return;
     }
 
+    if (req.url?.startsWith('/sticker')) {
+      void handleStickerPreview(req, res);
+      return;
+    }
+
     res.writeHead(404);
     res.end('not found');
   });
@@ -842,13 +1411,16 @@ function startHttpServer() {
       if (lastQrUpdate && currentAuthState === 'authorizationStateWaitQrCode') {
         sendToClient(ws, lastQrUpdate);
       }
-      if (clientReady && client?.connected && (await client.isUserAuthorized())) {
-        try {
-          const me = await client.getMe();
-          setSelfUserFromMe(me);
-          sendToClient(ws, { '@type': 'updateUser', user: serializeUser(me) });
-        } catch {
-          // ignore snapshot user errors
+      if (isBridgeClientReady()) {
+        const tg = bridgeClient();
+        if (tg?.connected && (await tg.isUserAuthorized())) {
+          try {
+            const me = await tg.getMe();
+            setSelfUserFromMe(me);
+            sendToClient(ws, { '@type': 'updateUser', user: serializeUser(me) });
+          } catch {
+            // ignore snapshot user errors
+          }
         }
       }
     })();
@@ -856,7 +1428,7 @@ function startHttpServer() {
     ws.on('close', () => wsClients.delete(ws));
     ws.on('message', (data) => {
       const text = typeof data === 'string' ? data : data.toString('utf8');
-      void handleWsCommand(text, ws);
+      void bridgeGlobal.__teleSheetHandleWsCommand?.(text, ws);
     });
   });
 
@@ -874,7 +1446,17 @@ function startHttpServer() {
 }
 
 export async function startTelegramBridge() {
+  bridgeGlobal.__teleSheetHandleWsCommand = handleWsCommand;
+
   if (bridgeGlobal.__teleSheetBridgeStarted) {
+    if (!bridgeClient() && credentialsConfigured()) {
+      try {
+        await bootstrapClient();
+      } catch (err) {
+        console.error('Telegram bridge re-bootstrap failed:', err);
+        broadcast({ '@type': 'error', message: `Bridge bootstrap failed: ${String(err)}` });
+      }
+    }
     return;
   }
   bridgeGlobal.__teleSheetBridgeStarted = true;
@@ -897,3 +1479,5 @@ export async function startTelegramBridge() {
     broadcast({ '@type': 'error', message: `Bridge bootstrap failed: ${String(err)}` });
   }
 }
+
+bridgeGlobal.__teleSheetHandleWsCommand = handleWsCommand;

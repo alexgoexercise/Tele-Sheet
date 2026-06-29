@@ -120,6 +120,11 @@ export function useTelegramAuth() {
     }
 
     if (update['@type'] === 'error') {
+      if (update.message === 'not authorized') {
+        setUser(null);
+        setQrUrl(null);
+        setStep('qr');
+      }
       setError(update.message ?? 'Something went wrong');
       setSubmitting(false);
     }

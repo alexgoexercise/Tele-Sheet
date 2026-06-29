@@ -93,6 +93,16 @@ export function useTelegramApi(onUpdate?: (update: WsUpdate) => void) {
     deleteMessages: (chatId: string | number, messageIds: number[], revoke = true) =>
       send({ method: 'deleteMessages', chat_id: chatId, message_ids: messageIds, revoke }),
 
+    /** Favorite stickers from Telegram. Response: `updateFavedStickers` */
+    getFavedStickers: () => send({ method: 'getFavedStickers' }),
+
+    /** Send a saved sticker by document reference. Response: `updateMessageSendSucceeded` */
+    sendSticker: (
+      chatId: string | number,
+      sticker: { id: string; access_hash: string; file_reference: string },
+      replyTo?: number,
+    ) => send({ method: 'sendSticker', chat_id: chatId, sticker, reply_to: replyTo }),
+
     // ─── User ────────────────────────────────────────────────────────────
     /** Current user. Response: `updateUser` */
     getMe: () => send({ method: 'getMe' }),

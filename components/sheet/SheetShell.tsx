@@ -20,7 +20,9 @@ import {
   Undo,
 } from 'lucide-react';
 import SheetFileMenu from '../SheetFileMenu';
+import SheetInsertMenu from '../SheetInsertMenu';
 import SheetProfileMenu from '../SheetProfileMenu';
+import SheetViewMenu from '../SheetViewMenu';
 import SyncStatusBadge from '../SyncStatusBadge';
 import GridRow, { SHEET_LABEL_W, SHEET_STATUS_W } from './GridRow';
 
@@ -50,6 +52,7 @@ type SheetTab = {
 type SheetShellProps = {
   title: string;
   formulaText: string;
+  formulaContent?: React.ReactNode;
   colA?: string;
   colB?: string;
   colC?: string;
@@ -60,6 +63,7 @@ type SheetShellProps = {
 export default function SheetShell({
   title,
   formulaText,
+  formulaContent,
   colA = 'Field',
   colB = 'Value',
   colC = 'Status',
@@ -78,7 +82,10 @@ export default function SheetShell({
             <SyncStatusBadge />
             <div className="flex gap-4 text-xs text-gray-600 mt-1">
               <SheetFileMenu />
-              {['Edit', 'View', 'Insert', 'Format', 'Data', 'Tools', 'Extensions', 'Help'].map((m) => (
+              <span className="hover:bg-gray-100 px-1 rounded cursor-default">Edit</span>
+              <SheetViewMenu />
+              <SheetInsertMenu />
+              {['Format', 'Data', 'Tools', 'Extensions', 'Help'].map((m) => (
                 <span key={m} className="hover:bg-gray-100 px-1 rounded cursor-default">
                   {m}
                 </span>
@@ -112,7 +119,9 @@ export default function SheetShell({
           fx
         </div>
         <div className="w-px h-5 bg-gray-300" />
-        <span className="flex-1 text-gray-500 text-sm truncate">{formulaText}</span>
+        <span className="flex-1 text-gray-500 text-sm truncate">
+          {formulaContent ?? formulaText}
+        </span>
       </div>
 
       <div className="flex-1 overflow-auto bg-[#f8f9fa]">
