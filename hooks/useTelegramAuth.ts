@@ -60,6 +60,7 @@ export function useTelegramAuth() {
   const updateListenersRef = useRef<Set<(update: WsUpdate) => void>>(new Set());
   const signingOutRef = useRef(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
+  const [sessionRestorePending, setSessionRestorePending] = useState(true);
 
   const clearSigningOut = useCallback(() => {
     signingOutRef.current = false;
@@ -109,6 +110,7 @@ export function useTelegramAuth() {
       setUser(update.user);
       setStep('ready');
       setSubmitting(false);
+      setSessionRestorePending(false);
     }
 
     if (update['@type'] === 'updateLoggedOut') {
@@ -140,7 +142,10 @@ export function useTelegramAuth() {
       retriesRef.current = 0;
       setConnected(true);
       setError(null);
-      ws.send(JSON.stringify({ method: 'getAuthState' }));
+      void (async () => {
+        await ensureBridgeStarted();
+        send({ method: 'getAuthState' });
+      })();
     };
 
     ws.onclose = () => {
@@ -161,7 +166,7 @@ export function useTelegramAuth() {
     };
 
     ws.onmessage = (ev) => handleMessage(ev.data as string);
-  }, [handleMessage]);
+  }, [handleMessage, send]);
 
   useEffect(() => {
     let cancelled = false;
@@ -184,6 +189,30 @@ export function useTelegramAuth() {
       clearSigningOut();
     }
   }, [isSigningOut, step, clearSigningOut]);
+
+  const refreshAuthState = useCallback(() => {
+    send({ method: 'getAuthState' });
+  }, [send]);
+
+  // Keep trying to restore a saved server-side session after tab reopen.
+  useEffect(() => {
+    setSessionRestorePending(true);
+    const grace = setTimeout(() => setSessionRestorePending(false), 20000);
+    return () => clearTimeout(grace);
+  }, []);
+
+  useEffect(() => {
+    if (!connected || user || step === 'ready') return;
+    if (step === 'phone' || step === 'code' || step === 'password') return;
+
+    refreshAuthState();
+    const id = setInterval(refreshAuthState, 2000);
+    const stop = setTimeout(() => clearInterval(id), 20000);
+    return () => {
+      clearInterval(id);
+      clearTimeout(stop);
+    };
+  }, [connected, user, step, refreshAuthState]);
 
   const startQrAuth = useCallback(() => {
     setError(null);
@@ -268,6 +297,7 @@ export function useTelegramAuth() {
     error,
     user,
     isSigningOut,
+    sessionRestorePending,
     submitting,
     qrUrl,
     passwordHint,
@@ -280,5 +310,6 @@ export function useTelegramAuth() {
     sendCommand,
     subscribeUpdates,
     clearError: () => setError(null),
+    refreshAuthState,
   };
 }

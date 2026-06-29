@@ -1,8 +1,10 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import AuthGuard from '../components/AuthGuard';
+import { useTelegramAuthContext } from '../components/TelegramAuthProvider';
 import DeleteSheetModal from '../components/DeleteSheetModal';
 import SheetFileMenu from '../components/SheetFileMenu';
 import SheetProfileMenu from '../components/SheetProfileMenu';
@@ -92,6 +94,15 @@ const generateSheetName = (sheets: Sheet[]): string => {
 };
 
 export default function App() {
+  const router = useRouter();
+  const { step, user } = useTelegramAuthContext();
+
+  useEffect(() => {
+    if (step === 'ready' && user) {
+      router.replace('/chats');
+    }
+  }, [step, user, router]);
+
   return (
     <AuthGuard>
       <SpreadsheetApp />

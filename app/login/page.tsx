@@ -49,6 +49,7 @@ export default function LoginPage() {
     sendCode,
     sendPassword,
     clearError,
+    refreshAuthState,
   } = useTelegramAuthContext();
 
   const [mode, setMode] = useState<LoginMode>('qr');
@@ -75,6 +76,14 @@ export default function LoginPage() {
       startQrAuth();
     }
   }, [connected, mode, step, qrUrl, submitting, startQrAuth]);
+
+  // After scanning on the phone, the bridge may finish auth without pushing an update.
+  useEffect(() => {
+    if (!connected || step !== 'qr') return;
+    refreshAuthState();
+    const id = setInterval(refreshAuthState, 2000);
+    return () => clearInterval(id);
+  }, [connected, step, refreshAuthState]);
 
   useEffect(() => {
     if (step === 'phone') phoneRef.current?.focus();

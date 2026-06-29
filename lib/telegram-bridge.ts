@@ -143,8 +143,23 @@ function authState(type: string, extra: Record<string, unknown> = {}) {
 }
 
 async function getAuthSnapshot(): Promise<TdUpdate> {
-  const tg = bridgeClient();
-  if (isBridgeClientReady() && tg?.connected && (await tg.isUserAuthorized())) {
+  if (credentialsConfigured()) {
+    if (!bridgeClient() && loadSession()) {
+      try {
+        await restoreTelegramSession();
+      } catch {
+        // fall through
+      }
+    } else if (bridgeClient()) {
+      try {
+        await completeAuthIfReady();
+      } catch {
+        // fall through
+      }
+    }
+  }
+
+  if (currentAuthState === 'authorizationStateReady') {
     return {
       '@type': 'updateAuthorizationState',
       authorization_state: { '@type': 'authorizationStateReady' },
@@ -155,9 +170,6 @@ async function getAuthSnapshot(): Promise<TdUpdate> {
     authInProgress && currentAuthState !== 'authorizationStateReady'
       ? currentAuthState
       : 'authorizationStateWaitQrCode';
-  if (currentAuthState === 'authorizationStateReady') {
-    currentAuthState = waitState;
-  }
 
   return {
     '@type': 'updateAuthorizationState',
@@ -184,6 +196,45 @@ function saveSession() {
   if (!tg) return;
   const session = tg.session.save() as unknown as string;
   fs.writeFileSync(sessionPath, session, 'utf8');
+}
+
+function isCorruptSessionError(err: unknown): boolean {
+  const message = String(err);
+  return /bad authkeyid|auth_key_invalid|auth_key_unregistered|auth_key_perm_empty|session_revoked|user_deactivated/i.test(
+    message,
+  );
+}
+
+/** Drop an invalid on-disk session and reset the Telegram client for a fresh login. */
+async function clearCorruptSession() {
+  cancelQrAuth();
+  authInProgress = false;
+  eventHandlersRegistered = false;
+  lastQrUpdate = null;
+  selfUserId = undefined;
+  currentAuthState = 'authorizationStateWaitQrCode';
+
+  const tg = bridgeClient();
+  if (tg) {
+    try {
+      await tg.disconnect();
+    } catch {
+      // ignore disconnect errors while clearing a bad session
+    }
+  }
+
+  try {
+    fs.unlinkSync(sessionPath);
+  } catch {
+    // session file may not exist
+  }
+
+  setBridgeClient(
+    new TelegramClient(new StringSession(''), apiId, apiHash, {
+      connectionRetries: 5,
+    }),
+  );
+  setBridgeClientReady(true);
 }
 
 const CREDENTIALS_ERROR =
@@ -512,12 +563,34 @@ function chatIdFromEntity(entity: object): string {
 }
 
 async function requireAuth(ws: WebSocket): Promise<TelegramClient | null> {
-  const tg = bridgeClient();
+  if (!credentialsConfigured()) {
+    sendToClient(ws, { '@type': 'error', message: CREDENTIALS_ERROR });
+    return null;
+  }
+
+  if (!bridgeClient()) {
+    await restoreTelegramSession(ws);
+  }
+
+  let tg = bridgeClient();
   if (!tg) {
     sendToClient(ws, { '@type': 'error', message: CREDENTIALS_ERROR });
     return null;
   }
-  if (!(await tg.isUserAuthorized())) {
+
+  try {
+    await ensureConnected();
+  } catch {
+    await restoreTelegramSession(ws);
+    tg = bridgeClient();
+  }
+
+  if (!tg || !(await tg.isUserAuthorized())) {
+    await restoreTelegramSession(ws);
+    tg = bridgeClient();
+  }
+
+  if (!tg || !(await tg.isUserAuthorized())) {
     if (currentAuthState === 'authorizationStateReady') {
       currentAuthState = 'authorizationStateWaitQrCode';
     }
@@ -528,6 +601,7 @@ async function requireAuth(ws: WebSocket): Promise<TelegramClient | null> {
     sendToClient(ws, { '@type': 'error', message: 'not authorized' });
     return null;
   }
+
   return tg;
 }
 
@@ -601,8 +675,138 @@ function getClient(): TelegramClient {
 
 async function ensureConnected() {
   const tg = getClient();
-  if (!tg.connected) {
+  if (tg.connected) return;
+  try {
     await tg.connect();
+  } catch (err) {
+    if (!isCorruptSessionError(err)) throw err;
+    console.warn('clearing corrupt Telegram session:', err);
+    await clearCorruptSession();
+    await getClient().connect();
+  }
+}
+
+let authFinalizeInFlight = false;
+let authCompletionWatch: ReturnType<typeof setInterval> | null = null;
+
+function stopAuthCompletionWatch() {
+  if (authCompletionWatch) {
+    clearInterval(authCompletionWatch);
+    authCompletionWatch = null;
+  }
+}
+
+function startAuthCompletionWatch(ws?: WebSocket) {
+  stopAuthCompletionWatch();
+  authCompletionWatch = setInterval(() => {
+    void completeAuthIfReady(ws);
+  }, 1500);
+}
+
+async function completeAuthIfReady(ws?: WebSocket): Promise<boolean> {
+  if (!credentialsConfigured()) return false;
+  if (authFinalizeInFlight) return currentAuthState === 'authorizationStateReady';
+
+  const tg = bridgeClient();
+  if (!tg) return false;
+
+  try {
+    await ensureConnected();
+    if (!(await tg.isUserAuthorized())) return false;
+
+    authFinalizeInFlight = true;
+    if (authInProgress) {
+      cancelQrAuth();
+    }
+
+    currentAuthState = 'authorizationStateReady';
+    registerEventHandlers();
+    saveSession();
+    await notifyAuthorizedSession(ws);
+    stopAuthCompletionWatch();
+    authInProgress = false;
+    return true;
+  } catch (err) {
+    if (isCorruptSessionError(err)) {
+      await clearCorruptSession();
+      authState('authorizationStateWaitQrCode');
+    }
+    return false;
+  } finally {
+    authFinalizeInFlight = false;
+  }
+}
+
+async function notifyAuthorizedSession(ws?: WebSocket) {
+  const tg = bridgeClient();
+  if (!tg) return;
+  const me = await tg.getMe();
+  setSelfUserFromMe(me);
+  const userUpdate: TdUpdate = { '@type': 'updateUser', user: serializeUser(me) };
+  const readyUpdate: TdUpdate = {
+    '@type': 'updateAuthorizationState',
+    authorization_state: { '@type': 'authorizationStateReady' },
+  };
+  currentAuthState = 'authorizationStateReady';
+  if (ws) {
+    sendToClient(ws, readyUpdate);
+    sendToClient(ws, userUpdate);
+  } else {
+    authState('authorizationStateReady');
+    broadcast(userUpdate);
+  }
+}
+
+/** Reconnect to Telegram and restore a saved session from disk when possible. */
+async function reloadClientFromDisk(ws?: WebSocket): Promise<boolean> {
+  const saved = loadSession();
+  if (!saved) return false;
+
+  eventHandlersRegistered = false;
+  const existing = bridgeClient();
+  if (existing) {
+    try {
+      await existing.disconnect();
+    } catch {
+      // ignore
+    }
+  }
+
+  setBridgeClient(
+    new TelegramClient(new StringSession(saved), apiId, apiHash, {
+      connectionRetries: 5,
+    }),
+  );
+  setBridgeClientReady(true);
+  return completeAuthIfReady(ws);
+}
+
+/** Reconnect to Telegram and restore a saved session from disk when possible. */
+async function restoreTelegramSession(ws?: WebSocket): Promise<boolean> {
+  if (!credentialsConfigured()) return false;
+
+  try {
+    if (!bridgeClient()) {
+      if (!loadSession()) return false;
+      return reloadClientFromDisk(ws);
+    }
+
+    if (await completeAuthIfReady(ws)) return true;
+
+    if (loadSession()) {
+      return reloadClientFromDisk(ws);
+    }
+
+    return false;
+  } catch (err) {
+    if (isCorruptSessionError(err)) {
+      console.warn('restoreTelegramSession: corrupt session, clearing:', err);
+      await clearCorruptSession();
+      authState('authorizationStateWaitQrCode');
+      return false;
+    }
+    console.warn('restoreTelegramSession failed:', err);
+    return false;
   }
 }
 
@@ -620,15 +824,14 @@ async function beginQrAuth() {
     await ensureConnected();
     const tg = getClient();
 
-    if (await tg.isUserAuthorized()) {
-      authState('authorizationStateReady');
-      registerEventHandlers();
+    if (await completeAuthIfReady()) {
       return;
     }
 
     cancelQrAuth();
     qrAbortController = new AbortController();
     authState('authorizationStateWaitQrCode');
+    startAuthCompletionWatch();
 
     await tg.signInUserWithQrCode(
       { apiId, apiHash },
@@ -656,19 +859,24 @@ async function beginQrAuth() {
       },
     );
 
-    saveSession();
-    authState('authorizationStateReady');
-    registerEventHandlers();
-
-    const me = await tg.getMe();
-    setSelfUserFromMe(me);
-    broadcast({ '@type': 'updateUser', user: serializeUser(me) });
+    await completeAuthIfReady();
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
+      await completeAuthIfReady();
+      return;
+    }
+    if (isCorruptSessionError(err)) {
+      await clearCorruptSession();
+      authState('authorizationStateWaitQrCode');
+      broadcast({
+        '@type': 'error',
+        message: 'Saved session expired. Scan the QR code to sign in again.',
+      });
       return;
     }
     broadcast({ '@type': 'error', message: String(err) });
   } finally {
+    stopAuthCompletionWatch();
     authInProgress = false;
     qrAbortController = null;
   }
@@ -684,8 +892,7 @@ async function beginPhoneAuth() {
     const tg = getClient();
 
     if (await tg.isUserAuthorized()) {
-      authState('authorizationStateReady');
-      registerEventHandlers();
+      await completeAuthIfReady();
       return;
     }
 
@@ -721,13 +928,7 @@ async function beginPhoneAuth() {
       },
     });
 
-    saveSession();
-    authState('authorizationStateReady');
-    registerEventHandlers();
-
-    const me = await tg.getMe();
-    setSelfUserFromMe(me);
-    broadcast({ '@type': 'updateUser', user: serializeUser(me) });
+    await completeAuthIfReady();
   } catch (err) {
     broadcast({ '@type': 'error', message: String(err) });
   } finally {
@@ -737,6 +938,7 @@ async function beginPhoneAuth() {
 
 async function handleLogout() {
   cancelQrAuth();
+  stopAuthCompletionWatch();
   authInProgress = false;
   eventHandlersRegistered = false;
 
@@ -777,6 +979,7 @@ async function handleLogout() {
 }
 
 async function bootstrapClient() {
+  eventHandlersRegistered = false;
   const session = new StringSession(loadSession());
   setBridgeClient(
     new TelegramClient(session, apiId, apiHash, {
@@ -784,19 +987,23 @@ async function bootstrapClient() {
     }),
   );
 
-  await ensureConnected();
+  try {
+    await ensureConnected();
+  } catch (err) {
+    if (!isCorruptSessionError(err)) throw err;
+    console.warn('bootstrapClient: corrupt session, clearing:', err);
+    await clearCorruptSession();
+    authState('authorizationStateWaitQrCode');
+    return;
+  }
 
   setBridgeClientReady(true);
   const tg = getClient();
 
   if (await tg.isUserAuthorized()) {
-    authState('authorizationStateReady');
-    registerEventHandlers();
-    const me = await tg.getMe();
-    setSelfUserFromMe(me);
-    broadcast({ '@type': 'updateUser', user: serializeUser(me) });
+    await completeAuthIfReady();
   } else {
-    void beginQrAuth();
+    authState('authorizationStateWaitQrCode');
   }
 }
 
@@ -872,7 +1079,13 @@ async function handleWsCommand(raw: string, ws: WebSocket) {
     }
 
     case 'getAuthState': {
-      sendToClient(ws, await getAuthSnapshot());
+      const restored = await restoreTelegramSession(ws);
+      if (!restored) {
+        await completeAuthIfReady(ws);
+      }
+      if (currentAuthState !== 'authorizationStateReady') {
+        sendToClient(ws, await getAuthSnapshot());
+      }
       return;
     }
 
@@ -1407,21 +1620,15 @@ function startHttpServer() {
       if (!credentialsConfigured()) {
         sendToClient(ws, { '@type': 'error', message: CREDENTIALS_ERROR });
       }
-      sendToClient(ws, await getAuthSnapshot());
+      const restored = await restoreTelegramSession(ws);
+      if (!restored) {
+        await completeAuthIfReady(ws);
+      }
+      if (currentAuthState !== 'authorizationStateReady') {
+        sendToClient(ws, await getAuthSnapshot());
+      }
       if (lastQrUpdate && currentAuthState === 'authorizationStateWaitQrCode') {
         sendToClient(ws, lastQrUpdate);
-      }
-      if (isBridgeClientReady()) {
-        const tg = bridgeClient();
-        if (tg?.connected && (await tg.isUserAuthorized())) {
-          try {
-            const me = await tg.getMe();
-            setSelfUserFromMe(me);
-            sendToClient(ws, { '@type': 'updateUser', user: serializeUser(me) });
-          } catch {
-            // ignore snapshot user errors
-          }
-        }
       }
     })();
 
@@ -1449,12 +1656,11 @@ export async function startTelegramBridge() {
   bridgeGlobal.__teleSheetHandleWsCommand = handleWsCommand;
 
   if (bridgeGlobal.__teleSheetBridgeStarted) {
-    if (!bridgeClient() && credentialsConfigured()) {
+    if (credentialsConfigured()) {
       try {
-        await bootstrapClient();
+        await restoreTelegramSession();
       } catch (err) {
-        console.error('Telegram bridge re-bootstrap failed:', err);
-        broadcast({ '@type': 'error', message: `Bridge bootstrap failed: ${String(err)}` });
+        console.warn('Telegram session restore on boot failed:', err);
       }
     }
     return;
