@@ -1,14 +1,33 @@
 # TeleSheet
 
-A Telegram client disguised as Google Sheets. The UI looks like a spreadsheet; messaging runs through a Teleproto backend embedded in the Next.js server.
+This is a **TELEGRAM CLIENT** that has a similar UI to **GOOGLE SHEETS**. It can be run as a local web app.
+
+![Login screen](./docs/images/login_page.png)
+
+## Potential Usage
+
+- to pretend you are working but actually chatting with friends;
+- to flex to your friends (that you have a much cooler telegram client than theirs)
+- to feel like you are still at work while chatting with friends;
+- (awaiting for new ideas)
 
 ## Requirements
 
 - Node.js 18+
+- Age 18+
 - A Telegram account
 - API credentials from [my.telegram.org](https://my.telegram.org) (API development tools)
 
-## Setup
+## How To Setup
+
+Firstly, pull this github repo to local using:
+
+```bash
+https://github.com/alexgoexercise/Tele-Sheet.git
+cd .\Tele-Sheet\
+```
+
+Downloading the node packages and set up a local .env file:
 
 ```bash
 npm install
@@ -34,11 +53,13 @@ Open [http://localhost:3000](http://localhost:3000). The Telegram bridge starts 
 
 ## Routes
 
-| URL | Purpose |
-|-----|---------|
-| `/` | Spreadsheet UI (requires login) |
-| `/login` | Sign-in page |
-| `/telegram` | Raw WebSocket debug console |
+
+| URL         | Purpose                         |
+| ----------- | ------------------------------- |
+| `/`         | Spreadsheet UI (requires login) |
+| `/login`    | Sign-in page                    |
+| `/telegram` | Raw WebSocket debug console     |
+
 
 Unauthenticated visits to `/` redirect to `/login`.
 
@@ -56,6 +77,8 @@ Session is saved in `teleproto_data/session.txt` (gitignored). You usually only 
 - **Sync badge** (under the document title): shows login/sync status. **All changes saved in Drive** means you are connected.
 - **File → Disconnect cloud sync…** logs out and returns you to `/login`.
 - **Sheet tabs** at the bottom are placeholder UI for now; Telegram chat integration is wired on the backend and ready for frontend work.
+
+
 
 ## Messaging API (for developers)
 
@@ -85,11 +108,15 @@ Backend handlers: `lib/telegram-bridge.ts`
 
 ## Optional environment variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TELEGRAM_BRIDGE_PORT` | `8765` | WebSocket bridge port |
-| `TELEPROTO_DATA_DIR` | `./teleproto_data` | Session storage directory |
+
+| Variable                      | Default                  | Description                   |
+| ----------------------------- | ------------------------ | ----------------------------- |
+| `TELEGRAM_BRIDGE_PORT`        | `8765`                   | WebSocket bridge port         |
+| `TELEPROTO_DATA_DIR`          | `./teleproto_data`       | Session storage directory     |
 | `NEXT_PUBLIC_TELEGRAM_WS_URL` | `ws://127.0.0.1:8765/ws` | WebSocket URL for the browser |
+
+
+
 
 ## Project layout
 
@@ -110,6 +137,8 @@ components/
   SheetFileMenu.tsx    File menu (logout)
 ```
 
+
+
 ## Scripts
 
 ```bash
@@ -119,8 +148,11 @@ npm run start    # Production server
 npm run lint     # ESLint
 ```
 
+
+
 ## Notes
 
 - `TELEGRAM_API_HASH` must stay in `.env` on the server only; never expose it in client code.
 - Logout clears the local session and invalidates the Telegram session.
 - `/telegram` is a developer page for inspecting raw WebSocket traffic during auth.
+
