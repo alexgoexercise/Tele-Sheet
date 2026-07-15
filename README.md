@@ -2,7 +2,10 @@
 
 This is a **TELEGRAM CLIENT** that has a similar UI to **GOOGLE SHEETS**. It can be run as a local web app.
 
+The following picture shows the log in page of the webapp.
 ![Login screen](./docs/images/login_page.png)
+
+The current function of this app includes sending texts, emojis, stickers, and GIFs to your friends and view the messages. It does not support sending images or videos currently.
 
 ## Potential Usage
 

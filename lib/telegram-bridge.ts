@@ -111,6 +111,41 @@ let cachedSavedGifs: Array<{
 
 const SAVED_MESSAGES_TITLE = 'Saved Messages';
 
+// #region agent log
+function debugLog(
+  location: string,
+  message: string,
+  data: Record<string, unknown>,
+  hypothesisId: string,
+) {
+  fetch('http://127.0.0.1:7437/ingest/e1c71fb7-d075-472e-8261-4e5bed5d80fe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'e208ca' },
+    body: JSON.stringify({
+      sessionId: 'e208ca',
+      location,
+      message,
+      data,
+      timestamp: Date.now(),
+      hypothesisId,
+    }),
+  }).catch(() => {});
+}
+
+function sessionDebugInfo(tg?: TelegramClient) {
+  const saved = loadSession();
+  const session = tg?.session as sessions.StringSession | undefined;
+  return {
+    hasSavedSession: Boolean(saved),
+    savedSessionLen: saved.length,
+    connected: tg?.connected ?? false,
+    dcId: session?.dcId,
+    serverAddress: session?.serverAddress,
+    hasAuthKey: Boolean(session?.authKey?.getKey?.()),
+  };
+}
+// #endregion
+
 function setSelfUserFromMe(user: Api.User) {
   selfUserId = user.id?.toString();
 }
@@ -209,6 +244,14 @@ function isCorruptSessionError(err: unknown): boolean {
 
 /** Drop an invalid on-disk session and reset the Telegram client for a fresh login. */
 async function clearCorruptSession() {
+  // #region agent log
+  debugLog(
+    'telegram-bridge.ts:clearCorruptSession',
+    'clearing corrupt session',
+    sessionDebugInfo(bridgeClient()),
+    'A',
+  );
+  // #endregion
   cancelQrAuth();
   authInProgress = false;
   eventHandlersRegistered = false;
@@ -862,19 +905,67 @@ function getClient(): TelegramClient {
 
 async function ensureConnected() {
   const tg = getClient();
+  // #region agent log
+  debugLog('telegram-bridge.ts:ensureConnected:entry', 'ensureConnected called', {
+    ...sessionDebugInfo(tg),
+    connectInFlight: Boolean(connectInFlight),
+  }, 'B');
+  // #endregion
   if (tg.connected) return;
+  if (connectInFlight) {
+    await connectInFlight;
+    return;
+  }
+
+  connectInFlight = (async () => {
+    try {
+      const connectResult = await tg.connect();
+      // #region agent log
+      debugLog(
+        'telegram-bridge.ts:ensureConnected:afterConnect',
+        'connect finished',
+        { ...sessionDebugInfo(tg), connectResult },
+        'D',
+      );
+      // #endregion
+    } catch (err) {
+      // #region agent log
+      debugLog(
+        'telegram-bridge.ts:ensureConnected:error',
+        'connect threw',
+        {
+          ...sessionDebugInfo(tg),
+          err: String(err),
+          isCorrupt: isCorruptSessionError(err),
+        },
+        'A',
+      );
+      // #endregion
+      if (!isCorruptSessionError(err)) throw err;
+      console.warn('clearing corrupt Telegram session:', err);
+      await clearCorruptSession();
+      const retryResult = await getClient().connect();
+      // #region agent log
+      debugLog(
+        'telegram-bridge.ts:ensureConnected:afterClear',
+        'connect after session clear',
+        { ...sessionDebugInfo(getClient()), connectResult: retryResult },
+        'C',
+      );
+      // #endregion
+    }
+  })();
+
   try {
-    await tg.connect();
-  } catch (err) {
-    if (!isCorruptSessionError(err)) throw err;
-    console.warn('clearing corrupt Telegram session:', err);
-    await clearCorruptSession();
-    await getClient().connect();
+    await connectInFlight;
+  } finally {
+    connectInFlight = null;
   }
 }
 
 let authFinalizeInFlight = false;
 let authCompletionWatch: ReturnType<typeof setInterval> | null = null;
+let connectInFlight: Promise<void> | null = null;
 
 function stopAuthCompletionWatch() {
   if (authCompletionWatch) {
@@ -898,8 +989,36 @@ async function completeAuthIfReady(ws?: WebSocket): Promise<boolean> {
   if (!tg) return false;
 
   try {
-    await ensureConnected();
-    if (!(await tg.isUserAuthorized())) return false;
+    if (authInProgress) {
+      if (!tg.connected) {
+        // #region agent log
+        debugLog(
+          'telegram-bridge.ts:completeAuthIfReady',
+          'skipped reconnect during active auth',
+          { ...sessionDebugInfo(tg), currentAuthState, authInProgress },
+          'B',
+        );
+        // #endregion
+        return false;
+      }
+    } else {
+      await ensureConnected();
+    }
+    const authorized = await tg.isUserAuthorized();
+    // #region agent log
+    debugLog(
+      'telegram-bridge.ts:completeAuthIfReady',
+      'auth check after connect',
+      {
+        ...sessionDebugInfo(tg),
+        authorized,
+        currentAuthState,
+        authInProgress,
+      },
+      'C',
+    );
+    // #endregion
+    if (!authorized) return false;
 
     authFinalizeInFlight = true;
     if (authInProgress) {
@@ -914,6 +1033,18 @@ async function completeAuthIfReady(ws?: WebSocket): Promise<boolean> {
     authInProgress = false;
     return true;
   } catch (err) {
+    // #region agent log
+    debugLog(
+      'telegram-bridge.ts:completeAuthIfReady:error',
+      'completeAuthIfReady failed',
+      {
+        ...sessionDebugInfo(tg),
+        err: String(err),
+        isCorrupt: isCorruptSessionError(err),
+      },
+      'E',
+    );
+    // #endregion
     if (isCorruptSessionError(err)) {
       await clearCorruptSession();
       authState('authorizationStateWaitQrCode');
@@ -1006,6 +1137,10 @@ async function beginQrAuth() {
   if (authInProgress) return;
   if (!(await ensureClientBootstrapped())) return;
   authInProgress = true;
+
+  // #region agent log
+  debugLog('telegram-bridge.ts:beginQrAuth', 'starting QR auth', sessionDebugInfo(bridgeClient()), 'D');
+  // #endregion
 
   try {
     await ensureConnected();
@@ -1167,7 +1302,21 @@ async function handleLogout() {
 
 async function bootstrapClient() {
   eventHandlersRegistered = false;
-  const session = new StringSession(loadSession());
+  const saved = loadSession();
+  const session = new StringSession(saved);
+  // #region agent log
+  debugLog(
+    'telegram-bridge.ts:bootstrapClient',
+    'bootstrapping client',
+    {
+      hasSavedSession: Boolean(saved),
+      savedSessionLen: saved.length,
+      dcId: session.dcId,
+      serverAddress: session.serverAddress,
+    },
+    'A',
+  );
+  // #endregion
   setBridgeClient(
     new TelegramClient(session, apiId, apiHash, {
       connectionRetries: 5,
